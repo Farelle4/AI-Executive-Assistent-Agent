@@ -3,10 +3,34 @@ from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from datetime import datetime
+from email_classifier import analyze_email
 import os
 import os.path
 import base64
-from bs4 import BeautifulSoup
+import dateparser
+
+
+def normalize_datetime(raw_datetime):
+
+    if not raw_datetime:
+        return None
+
+    parsed = dateparser.parse(
+        raw_datetime,
+        settings={
+            "PREFER_DATES_FROM": "future"
+        }
+    )
+
+    if parsed:
+        return {
+            "date": parsed.strftime("%d.%m.%Y"),
+            "time": parsed.strftime("%H:%M")
+        }
+
+    return None
+
 
 # Define the SCOPES. If modifying it, delete the token.json file.
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
@@ -93,22 +117,43 @@ def getEmails():
 
 
             # Printing the subject, sender's email and message
-            print("Subject: ", subject)
-            print("From: ", sender)
-            print("Message: ", body)
-            print('\n')
+            #print("Subject: ", subject)
+            #print("From: ", sender)
+            #print("Message: ", body)
+            #print('\n')
 
-            # Mark the email as read
-            service.users().messages().modify(
-                userId='me',
-                id=msg['id'],
-                body={
-                    'removeLabelIds': ['UNREAD']
-                }
-            ).execute()
+            MAX_BODY_LENGTH = 3000
+
+            clean_body = body[:MAX_BODY_LENGTH]
+            analysis = analyze_email(subject, sender, clean_body)
+
+            analysis = analyze_email(subject, sender, clean_body)
+
+            if analysis and analysis.get("intent") != "error":
+
+                normalized = normalize_datetime(
+                    analysis.get("raw_datetime")
+                )
+
+                if normalized:
+                    analysis["date"] = normalized["date"]
+                    analysis["time"] = normalized["time"]
+
+                print("\n===== AI ANALYSIS =====")
+                print(analysis)
+                print(normalize_datetime(analysis.get("raw_datetime")))
+
+                # Mark the email as read
+                service.users().messages().modify(
+                    userId='me',
+                    id=msg['id'],
+                    body={'removeLabelIds': ['UNREAD']}
+                ).execute()
+            else:
+                print("Skipping email due to LLM error")
+
         except Exception as e:
             print("ERROR:", e)
 
 
 getEmails()
-print("All Emails have been fetched successfully!")
