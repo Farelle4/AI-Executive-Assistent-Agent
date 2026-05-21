@@ -53,6 +53,7 @@ CRITICAL RULE:
 - DO NOT convert dates
 - DO NOT interpret dates
 - ONLY copy the exact text that refers to time
+- Return temporal expressions in English only (e.g. "next Monday", "tomorrow", "Friday 3pm")
 
 Examples:
 - "next Monday"

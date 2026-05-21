@@ -3,12 +3,23 @@ from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from datetime import datetime
+from datetime import datetime, timedelta
 from email_classifier import analyze_email
 import os
 import os.path
 import base64
 import dateparser
+
+WEEKDAYS = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6
+}
+DEFAULT_HOUR = 9
 
 
 def normalize_datetime(raw_datetime):
@@ -16,18 +27,41 @@ def normalize_datetime(raw_datetime):
     if not raw_datetime:
         return None
 
+    raw_datetime = raw_datetime.strip().lower()
+    now = datetime.now()
+
+    # 1. RULE BASED (next Monday etc.)
+    for day_name, target_weekday in WEEKDAYS.items():
+        if day_name in raw_datetime:
+
+            days_ahead = target_weekday - now.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+
+            result = now + timedelta(days=days_ahead)
+
+            return result.replace(
+                hour=DEFAULT_HOUR,
+                minute=0,
+                second=0,
+                microsecond=0
+            )
+
+    # 2. DATEPARSER FALLBACK
     parsed = dateparser.parse(
         raw_datetime,
         settings={
-            "PREFER_DATES_FROM": "future"
+            "RELATIVE_BASE": now,
+            "PREFER_DATES_FROM": "future",
         }
     )
 
     if parsed:
-        return {
-            "date": parsed.strftime("%d.%m.%Y"),
-            "time": parsed.strftime("%H:%M")
-        }
+        # If hour fails → fallback 09:00
+        if parsed.hour == 0 and parsed.minute == 0:
+            parsed = parsed.replace(hour=DEFAULT_HOUR)
+
+        return parsed
 
     return None
 
@@ -131,17 +165,14 @@ def getEmails():
 
             if analysis and analysis.get("intent") != "error":
 
-                normalized = normalize_datetime(
-                    analysis.get("raw_datetime")
-                )
+                dt = normalize_datetime(analysis.get("raw_datetime"))
 
-                if normalized:
-                    analysis["date"] = normalized["date"]
-                    analysis["time"] = normalized["time"]
+                if dt:
+                    
+                    analysis["datetime"] = dt.strftime("%Y-%m-%d %H:%M:%S")
 
                 print("\n===== AI ANALYSIS =====")
                 print(analysis)
-                print(normalize_datetime(analysis.get("raw_datetime")))
 
                 # Mark the email as read
                 service.users().messages().modify(
