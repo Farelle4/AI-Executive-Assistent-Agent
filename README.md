@@ -5,11 +5,4 @@ checks calendar availability, generates suitable meeting time slots, and drafts 
 responses and replies with human approval.
 
 **Tech Stack**
-  Python
-  LangChain
-  MiniMax or GPT-based models
-  Gmail API
-  Google Calendar API
-  Supabase
-  Whisper (optional)
-  Text-to-Speech (optional)
+  Python, LangChain, Groq, Gmail API, Google Calendar API, Supabase
