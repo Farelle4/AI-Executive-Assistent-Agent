@@ -30,7 +30,7 @@ def normalize_datetime(raw_datetime):
     raw_datetime = raw_datetime.strip().lower()
     now = datetime.now()
 
-    # 1. RULE BASED (next Monday etc.)
+    # 1. RULE BASED 
     for day_name, target_weekday in WEEKDAYS.items():
         if day_name in raw_datetime:
 
@@ -105,12 +105,9 @@ def getEmails():
         maxResults=1
         ).execute()
 
-    # We can also pass maxResults to get any number of emails. Like this:
-    # result = service.users().messages().list(maxResults=200, userId='me').execute()
     messages = result.get('messages', [])
 
     # messages is a list of dictionaries where each dictionary contains a message id.
-
     # iterate through all the messages
     for msg in messages:
         # Get the message from its id
@@ -159,8 +156,6 @@ def getEmails():
             MAX_BODY_LENGTH = 3000
 
             clean_body = body[:MAX_BODY_LENGTH]
-            analysis = analyze_email(subject, sender, clean_body)
-
             analysis = analyze_email(subject, sender, clean_body)
 
             if analysis and analysis.get("intent") != "error":
