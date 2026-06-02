@@ -21,15 +21,10 @@ IGNORE_SENDERS = [
 
 def analyze_email(subject, sender, body):
 
-    # Ignore automated emails
-    if any(word in sender.lower() for word in IGNORE_SENDERS):
-        return {
-            "intent": "ignored",
-            "confidence": 1.0,
-            "date": "",
-            "time": "",
-            "sender": sender
-        }
+    # Mark email as suspicious if sender matches common patterns of unwanted emails
+    is_suspicious_sender = any(
+        word in sender.lower() for word in IGNORE_SENDERS
+    )
     
     # Try to extract important informations from the email
     prompt = f"""
@@ -47,6 +42,14 @@ INTENTS:
 - meeting_cancellation
 - information_request
 - other
+
+IMPORTANT:
+Do NOT classify emails as irrelevant only because the sender contains:
+- no-reply
+- noreply
+- automated systems
+
+Many important meeting confirmations come from such senders (Doctolib, Calendly, Google Calendar).
 
 CRITICAL RULE:
 - DO NOT calculate dates

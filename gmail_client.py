@@ -21,6 +21,31 @@ WEEKDAYS = {
 }
 DEFAULT_HOUR = 9
 
+NEWSLETTER_HEADERS = {
+    "list-unsubscribe",
+    "precedence",
+    "x-mailer",
+}
+
+IGNORE_LABELS = {
+    "CATEGORY_PROMOTIONS",
+    "CATEGORY_SOCIAL",
+    "SPAM",
+}
+
+
+MARKETING_KEYWORDS = [
+    "unsubscribe",
+    "newsletter",
+    "marketing",
+    "promotion",
+    "offer",
+    "discount",
+    "sale",
+    "no-reply",
+    "noreply",
+]
+
 
 def normalize_datetime(raw_datetime):
 
@@ -50,6 +75,7 @@ def normalize_datetime(raw_datetime):
     # 2. DATEPARSER FALLBACK
     parsed = dateparser.parse(
         raw_datetime,
+        languages=["fr", "de", "en"],
         settings={
             "RELATIVE_BASE": now,
             "PREFER_DATES_FROM": "future",
@@ -65,6 +91,75 @@ def normalize_datetime(raw_datetime):
 
     return None
 
+def should_ignore_email(subject, sender, body, headers, label_ids):
+    sender = sender.lower()
+    subject = subject.lower()
+    body_sample = body[:500].lower()
+
+    # 1. Labels Gmail
+    if set(label_ids).intersection(IGNORE_LABELS):
+        return True
+
+    # 2. Sender patterns
+    if any(x in sender for x in ["no-reply", "noreply", "newsletter", "marketing"]):
+        return True
+
+    # 3. Keywords (subject + body)
+    text = subject + " " + body_sample
+    if any(word in text for word in MARKETING_KEYWORDS):
+        return True
+
+    # 4. Newsletter headers
+    header_names = [h["name"].lower() for h in headers]
+    if any(h in header_names for h in NEWSLETTER_HEADERS):
+        return True
+
+    return False
+
+# return the body of the email, handling different formats (plain text, HTML, multipart)
+import base64
+
+def decode_base64(data):
+    if not data:
+        return None
+    data = data.replace("-", "+").replace("_", "/")
+    return base64.b64decode(data).decode("utf-8", errors="ignore")
+
+
+def extract_body(payload):
+
+    def walk(part):
+        mime = part.get("mimeType", "")
+
+        # 1. PRIORITY: text/plain
+        if mime == "text/plain" and part.get("body", {}).get("data"):
+            return decode_base64(part["body"]["data"])
+
+        # 2. fallback: text/html
+        if mime == "text/html" and part.get("body", {}).get("data"):
+            return decode_base64(part["body"]["data"])
+
+        # 3. recursion
+        if "parts" in part:
+            for sub in part["parts"]:
+                result = walk(sub)
+                if result:
+                    return result
+
+        return None
+
+    # 1. direct body
+    if payload.get("body", {}).get("data"):
+        return decode_base64(payload["body"]["data"])
+
+    # 2. recursive parts
+    if "parts" in payload:
+        for part in payload["parts"]:
+            result = walk(part)
+            if result:
+                return result
+
+    return None
 
 # Define the SCOPES. If modifying it, delete the token.json file.
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
@@ -121,6 +216,9 @@ def getEmails():
             payload = txt['payload']
             headers = payload['headers']
 
+            label_ids = txt.get("labelIds", [])
+            headers = payload.get("headers", [])
+
             # Look for Subject and Sender Email in the headers
             for d in headers:
                 if d['name'] == 'Subject':
@@ -129,17 +227,16 @@ def getEmails():
                     sender = d['value']
 
             # The Body of the message is in Encrypted format. So, we have to decode it.
-            # Get the data and decode it with base 64 decoder.
 
             body = "(No body found)"
 
             payload_body = payload.get("body", {})
             data = payload_body.get("data")
 
-            if not data:
-                parts = payload.get("parts", [])
-                if parts:
-                    data = parts[0]['body'].get('data')
+            body = extract_body(payload)
+
+            if not body:
+                body = "(No body found)"
 
             if data:
                 data = data.replace("-", "+").replace("_", "/")
@@ -148,15 +245,48 @@ def getEmails():
 
 
             # Printing the subject, sender's email and message
-            #print("Subject: ", subject)
-            #print("From: ", sender)
-            #print("Message: ", body)
-            #print('\n')
+            print("Subject: ", subject)
+            print("From: ", sender)
+            print("Message: ", body)
+            print('\n')
+
 
             MAX_BODY_LENGTH = 3000
-
             clean_body = body[:MAX_BODY_LENGTH]
+
+            is_probably_noise = should_ignore_email(subject, sender, body, headers, label_ids)
+
             analysis = analyze_email(subject, sender, clean_body)
+
+            raw = analysis.get("raw_datetime", "").strip()
+
+            if raw:
+                dt = normalize_datetime(raw)
+
+                if dt:
+                    analysis["datetime_iso"] = dt.isoformat()
+                else:
+                    analysis["datetime_iso"] = None
+            else:
+                analysis["datetime_iso"] = None
+
+            valid_intents = {
+                "meeting_request",
+                "meeting_confirmation",
+                "meeting_cancellation"
+            }
+
+            if analysis.get("intent") not in valid_intents:
+                            print("================ Ignored non-meeting email")
+
+                            #Mark as read and skip
+                            service.users().messages().modify(
+                                userId='me',
+                                id=msg['id'],
+                                body={'removeLabelIds': ['UNREAD']}
+                            ).execute()
+                            continue
+            
 
             if analysis and analysis.get("intent") != "error":
 
