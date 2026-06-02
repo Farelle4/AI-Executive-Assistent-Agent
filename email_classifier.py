@@ -57,6 +57,7 @@ CRITICAL RULE:
 - DO NOT interpret dates
 - ONLY copy the exact text that refers to time
 - Return temporal expressions in English only (e.g. "next Monday", "tomorrow", "Friday 3pm")
+- If a full date is present (day + month + year), ALWAYS use it.
 
 Examples:
 - "next Monday"

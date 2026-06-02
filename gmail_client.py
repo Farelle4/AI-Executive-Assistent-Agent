@@ -4,6 +4,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from datetime import datetime, timedelta
+from google_calendar import create_event, is_time_free
 from email_classifier import analyze_email
 import os
 import os.path
@@ -48,29 +49,34 @@ MARKETING_KEYWORDS = [
 
 
 def normalize_datetime(raw_datetime):
-
     if not raw_datetime:
         return None
 
-    raw_datetime = raw_datetime.strip().lower()
     now = datetime.now()
+    text = raw_datetime.strip().lower()
 
-    # 1. RULE BASED 
-    for day_name, target_weekday in WEEKDAYS.items():
-        if day_name in raw_datetime:
+    # 1. cleanup léger
+    text = text.replace("den", "").replace("uhr", "").strip()
 
-            days_ahead = target_weekday - now.weekday()
-            if days_ahead <= 0:
-                days_ahead += 7
+    # 2. dateparser (gère TOUT: relative + absolute)
+    parsed = dateparser.parse(
+        text,
+        languages=["de", "fr", "en"],
+        settings={
+            "RELATIVE_BASE": now,
+            "PREFER_DATES_FROM": "future",
+            "DATE_ORDER": "DMY",
+        }
+    )
 
-            result = now + timedelta(days=days_ahead)
+    if not parsed:
+        return None
 
-            return result.replace(
-                hour=DEFAULT_HOUR,
-                minute=0,
-                second=0,
-                microsecond=0
-            )
+    # 3. fallback heure si absente
+    if parsed.hour == 0 and parsed.minute == 0:
+        parsed = parsed.replace(hour=9)
+
+    return parsed
 
     # 2. DATEPARSER FALLBACK
     parsed = dateparser.parse(
@@ -162,7 +168,10 @@ def extract_body(payload):
     return None
 
 # Define the SCOPES. If modifying it, delete the token.json file.
-SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar"
+]
 
 
 def getEmails():
@@ -247,14 +256,12 @@ def getEmails():
             # Printing the subject, sender's email and message
             print("Subject: ", subject)
             print("From: ", sender)
-            print("Message: ", body)
+            #print("Message: ", body)
             print('\n')
 
 
             MAX_BODY_LENGTH = 3000
             clean_body = body[:MAX_BODY_LENGTH]
-
-            is_probably_noise = should_ignore_email(subject, sender, body, headers, label_ids)
 
             analysis = analyze_email(subject, sender, clean_body)
 
@@ -276,21 +283,69 @@ def getEmails():
                 "meeting_cancellation"
             }
 
-            if analysis.get("intent") not in valid_intents:
-                            print("================ Ignored non-meeting email")
+            if not analysis or analysis.get("intent") == "error":
+                print(" LLM error")
 
-                            #Mark as read and skip
-                            service.users().messages().modify(
-                                userId='me',
-                                id=msg['id'],
-                                body={'removeLabelIds': ['UNREAD']}
-                            ).execute()
-                            continue
+                service.users().messages().modify(
+                    userId='me',
+                    id=msg['id'],
+                    body={'removeLabelIds': ['UNREAD']}
+                ).execute()
+
+                continue
+
+
+            intent = analysis.get("intent")
+            valid_intents = {"meeting_request", "meeting_confirmation"}
+
+            if intent not in valid_intents:
+                print("======= Ignored non-meeting email")
+
+                service.users().messages().modify(
+                    userId='me',
+                    id=msg['id'],
+                    body={'removeLabelIds': ['UNREAD']}
+                ).execute()
+
+                continue
             
 
-            if analysis and analysis.get("intent") != "error":
+            dt = normalize_datetime(analysis.get("raw_datetime"))
 
-                dt = normalize_datetime(analysis.get("raw_datetime"))
+            if intent == "meeting_confirmation":
+                if dt:
+                    create_event(
+                        title="Meeting confirmation",
+                        start_iso=dt.isoformat(),
+                        duration_minutes=30
+                    )
+                    print(" Event created")
+
+
+
+
+            elif intent == "meeting_request":
+                if dt:
+                    available = is_time_free(dt.isoformat())
+
+                    if available:
+                        print("OK available → creating event")
+
+                        result = create_event(
+                            title=subject,
+                            start_iso=dt.isoformat(),
+                            duration_minutes=30
+                        )
+
+                        print("📅 EVENT CREATED:", result)
+
+                    else:
+                        print("❌ REJECT - busy time")
+
+
+
+
+            if analysis and analysis.get("intent") != "error":
 
                 if dt:
                     
