@@ -4,8 +4,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from datetime import datetime, timedelta
-from google_calendar import create_event, is_time_free
-from email_classifier import analyze_email
+from src.google_calendar import create_event, is_time_free
+from src.email_classifier import analyze_email
 import os
 import os.path
 import base64
@@ -46,6 +46,7 @@ MARKETING_KEYWORDS = [
     "no-reply",
     "noreply",
 ]
+
 
 
 def normalize_datetime(raw_datetime):
@@ -337,10 +338,10 @@ def getEmails():
                             duration_minutes=30
                         )
 
-                        print("📅 EVENT CREATED:", result)
+                        print(" EVENT CREATED:", result)
 
                     else:
-                        print("❌ REJECT - busy time")
+                        print(" REJECT - busy time")
 
 
 

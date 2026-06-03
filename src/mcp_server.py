@@ -1,11 +1,10 @@
 from mcp.server.fastmcp import FastMCP
-from google_calendar import create_event, list_events
+from src.google_calendar import create_event, list_events
 
 mcp = FastMCP("google-calendar")
 
-# ---------------------------
-# CREATE EVENT TOOL
-# ---------------------------
+
+# Create event tool
 @mcp.tool()
 def create_calendar_event(
     title: str,
@@ -24,9 +23,7 @@ def create_calendar_event(
         }
 
 
-# ---------------------------
-# LIST EVENTS TOOL
-# ---------------------------
+# List events tool
 @mcp.tool()
 def get_upcoming_events(limit: int = 5):
     """
@@ -41,9 +38,7 @@ def get_upcoming_events(limit: int = 5):
         }
 
 
-# ---------------------------
-# HEALTH CHECK TOOL
-# ---------------------------
+# Health check tool
 @mcp.tool()
 def ping():
     return {"status": "ok", "service": "google-calendar-mcp"}

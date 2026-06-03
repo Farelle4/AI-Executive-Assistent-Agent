@@ -1,5 +1,5 @@
 from googleapiclient.discovery import build
-from google_calendar_auth import get_creds
+from src.google_calendar_auth import get_creds
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 
