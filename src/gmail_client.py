@@ -6,13 +6,19 @@ from google.oauth2.credentials import Credentials
 from datetime import datetime, timedelta
 from src.google_calendar import create_event, is_time_free
 from src.email_classifier import analyze_email
+from zoneinfo import ZoneInfo
+from dateutil import parser
+from dateparser import parse
+import re
+import re
 import os
 import os.path
 import base64
-import dateparser
+
+DEFAULT_HOUR = 9
 
 WEEKDAYS = {
-    "monday": 0,
+    "monday": 0,   
     "tuesday": 1,
     "wednesday": 2,
     "thursday": 3,
@@ -20,7 +26,6 @@ WEEKDAYS = {
     "saturday": 5,
     "sunday": 6
 }
-DEFAULT_HOUR = 9
 
 NEWSLETTER_HEADERS = {
     "list-unsubscribe",
@@ -49,54 +54,122 @@ MARKETING_KEYWORDS = [
 
 
 
+
+
+TZ = ZoneInfo("Europe/Berlin")
+
+def parse_time_only(text):
+    if not text:
+        return None
+
+    parsed = parse(text)
+
+    if not parsed:
+        return None
+
+    return parsed.time()
+
 def normalize_datetime(raw_datetime):
     if not raw_datetime:
         return None
 
-    now = datetime.now()
-    text = raw_datetime.strip().lower()
+    raw_datetime = raw_datetime.strip().lower()
+    now = datetime.now(TZ)
 
-    # 1. cleanup léger
-    text = text.replace("den", "").replace("uhr", "").strip()
+    # -------------------------
+    # 1. RULE BASED (next Monday, next Friday, etc.)
+    # -------------------------
+    for day_name, target_weekday in WEEKDAYS.items():
+        if day_name in raw_datetime:
 
-    # 2. dateparser (gère TOUT: relative + absolute)
-    parsed = dateparser.parse(
-        text,
-        languages=["de", "fr", "en"],
+            days_ahead = target_weekday - now.weekday()
+            if days_ahead <= 0:
+                days_ahead += 7
+
+            result = now + timedelta(days=days_ahead)
+
+            return result.replace(
+                hour=DEFAULT_HOUR,
+                minute=0,
+                second=0,
+                microsecond=0
+            )
+
+    # -------------------------
+    # 2. DATEPARSER FALLBACK
+    # -------------------------
+    parsed = parse(
+        raw_datetime,
         settings={
             "RELATIVE_BASE": now,
             "PREFER_DATES_FROM": "future",
-            "DATE_ORDER": "DMY",
+            "TIMEZONE": "Europe/Berlin"
         }
     )
 
     if not parsed:
         return None
 
-    # 3. fallback heure si absente
+    # fallback hour si vide
     if parsed.hour == 0 and parsed.minute == 0:
-        parsed = parsed.replace(hour=9)
+        parsed = parsed.replace(hour=DEFAULT_HOUR)
 
     return parsed
 
-    # 2. DATEPARSER FALLBACK
-    parsed = dateparser.parse(
-        raw_datetime,
-        languages=["fr", "de", "en"],
+
+def resolve_datetime(date_text, time_text):
+    if not date_text or not time_text:
+        return None
+
+    base = datetime.now(TZ)
+
+    dt = parse(
+        f"{date_text} {time_text}",
+        languages=["en", "de"],
         settings={
-            "RELATIVE_BASE": now,
-            "PREFER_DATES_FROM": "future",
+            "RELATIVE_BASE": base,
+            "TIMEZONE": "Europe/Berlin",
+            "RETURN_AS_TIMEZONE_AWARE": True,
+            "PREFER_DATES_FROM": "future"
         }
     )
 
-    if parsed:
-        # If hour fails → fallback 09:00
-        if parsed.hour == 0 and parsed.minute == 0:
-            parsed = parsed.replace(hour=DEFAULT_HOUR)
+    return dt
 
-        return parsed
 
-    return None
+def build_datetime_range(analysis):
+    raw_date = analysis.get("raw_date")
+    start_time = analysis.get("start_raw_time")
+    end_time = analysis.get("end_raw_time")
+
+    if not raw_date or not start_time:
+        return None, None
+
+    date_part = normalize_datetime(raw_date)
+    time_part = parse_time_only(start_time)
+
+    if not date_part or not time_part:
+        return None, None
+
+    start = datetime.combine(
+        date_part.date(),
+        time_part
+    ).replace(tzinfo=TZ)
+
+    if end_time:
+        end_time_part = parse_time_only(end_time)
+        if end_time_part:
+            end = datetime.combine(
+                date_part.date(),
+                end_time_part
+            ).replace(tzinfo=TZ)
+        else:
+            end = start + timedelta(minutes=30)
+    else:
+        end = start + timedelta(minutes=30)
+
+    return start, end
+
 
 def should_ignore_email(subject, sender, body, headers, label_ids):
     sender = sender.lower()
@@ -124,8 +197,6 @@ def should_ignore_email(subject, sender, body, headers, label_ids):
     return False
 
 # return the body of the email, handling different formats (plain text, HTML, multipart)
-import base64
-
 def decode_base64(data):
     if not data:
         return None
@@ -173,6 +244,69 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/calendar"
 ]
+
+from bs4 import BeautifulSoup
+
+def clean_email_body(html):
+    if not html:
+        return ""
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+
+    text = soup.get_text(" ")
+
+    return " ".join(text.split())
+
+import re
+
+DATE_PATTERNS = [
+    # 30.04.2026, 07:40 - 07:50
+    r"(\d{2}\.\d{2}\.\d{4})\D*(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})",
+
+    # 2026-04-30 07:40 - 07:50
+    r"(\d{4}-\d{2}-\d{2})\D*(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})",
+
+    # next friday 10 am (fallback text)
+    r"(next\s+\w+.*?\d{1,2}:\d{2})",
+]
+
+def extract_event_data(text):
+    for pattern in DATE_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+
+        groups = match.groups()
+
+        # cas structuré date + time range
+        if len(groups) == 3:
+            return {
+                "raw_date": groups[0],
+                "start_raw_time": groups[1],
+                "end_raw_time": groups[2],
+            }
+
+        # cas texte naturel
+        if len(groups) == 1:
+            return {
+                "raw_date": groups[0],
+                "start_raw_time": None,
+                "end_raw_time": None,
+            }
+
+    return None
+
+
+
+
+
+
+
+
+
 
 
 def getEmails():
@@ -224,7 +358,6 @@ def getEmails():
         try:
             # Get value of 'payload' from dictionary 'txt'
             payload = txt['payload']
-            headers = payload['headers']
 
             label_ids = txt.get("labelIds", [])
             headers = payload.get("headers", [])
@@ -248,11 +381,6 @@ def getEmails():
             if not body:
                 body = "(No body found)"
 
-            if data:
-                data = data.replace("-", "+").replace("_", "/")
-                decoded_data = base64.b64decode(data)
-                body = decoded_data.decode('utf-8', errors='ignore')
-
 
             # Printing the subject, sender's email and message
             print("Subject: ", subject)
@@ -261,22 +389,20 @@ def getEmails():
             print('\n')
 
 
-            MAX_BODY_LENGTH = 3000
-            clean_body = body[:MAX_BODY_LENGTH]
+            clean_text = clean_email_body(body)
 
-            analysis = analyze_email(subject, sender, clean_body)
+            event_data = extract_event_data(clean_text)
 
-            raw = analysis.get("raw_datetime", "").strip()
+            analysis = analyze_email(subject, sender, clean_text)
 
-            if raw:
-                dt = normalize_datetime(raw)
-
-                if dt:
-                    analysis["datetime_iso"] = dt.isoformat()
-                else:
-                    analysis["datetime_iso"] = None
-            else:
-                analysis["datetime_iso"] = None
+            if not analysis or analysis.get("intent") == "error":
+                print("Ignored (LLM error)")
+                service.users().messages().modify(
+                    userId='me',
+                    id=msg['id'],
+                    body={'removeLabelIds': ['UNREAD']}
+                ).execute()
+                continue
 
             valid_intents = {
                 "meeting_request",
@@ -284,85 +410,78 @@ def getEmails():
                 "meeting_cancellation"
             }
 
-            if not analysis or analysis.get("intent") == "error":
-                print(" LLM error")
-
-                service.users().messages().modify(
-                    userId='me',
-                    id=msg['id'],
-                    body={'removeLabelIds': ['UNREAD']}
-                ).execute()
-
-                continue
-
-
             intent = analysis.get("intent")
-            valid_intents = {"meeting_request", "meeting_confirmation"}
 
             if intent not in valid_intents:
-                print("======= Ignored non-meeting email")
+                print("Ignored non-meeting email")
 
                 service.users().messages().modify(
                     userId='me',
                     id=msg['id'],
                     body={'removeLabelIds': ['UNREAD']}
                 ).execute()
-
                 continue
-            
 
-            dt = normalize_datetime(analysis.get("raw_datetime"))
+            # 🔥 MERGE LLM + RULE ENGINE (IMPORTANT)
+            if event_data:
+                analysis.update(event_data)
+
+            start, end = build_datetime_range(analysis)
+
+
+            # ---------------- LOGIC ----------------
 
             if intent == "meeting_confirmation":
-                if dt:
+                if start and end:
                     create_event(
                         title="Meeting confirmation",
-                        start_iso=dt.isoformat(),
-                        duration_minutes=30
+                        start_iso=start.isoformat(),
+                        end_iso=end.isoformat()
                     )
-                    print(" Event created")
-
-
+                    service.users().messages().modify(
+                        userId='me',
+                        id=msg['id'],
+                        body={'removeLabelIds': ['UNREAD']}
+                    ).execute()
+                    print("************* Event created ***************")
+                    print("\n============ AI ANALYSIS ============")
+                    print(analysis)
+                    print("START:", start)
+                    print("END:", end)
 
 
             elif intent == "meeting_request":
-                if dt:
-                    available = is_time_free(dt.isoformat())
+                if start and end:
 
-                    if available:
-                        print("OK available → creating event")
+                    if is_time_free(start.isoformat(), duration_minutes=30):
 
-                        result = create_event(
+                        create_event(
                             title=subject,
-                            start_iso=dt.isoformat(),
-                            duration_minutes=30
+                            start_iso=start.isoformat(),
+                            end_iso=end.isoformat()
                         )
 
-                        print(" EVENT CREATED:", result)
+                        service.users().messages().modify(
+                            userId='me',
+                            id=msg['id'],
+                            body={'removeLabelIds': ['UNREAD']}
+                        ).execute()
+                        print("+++++++++++ Available → event created ++++++++++++")
 
                     else:
-                        print(" REJECT - busy time")
+                        print("------------ BUSY → rejected ----------------")
 
 
-
-
-            if analysis and analysis.get("intent") != "error":
-
-                if dt:
-                    
-                    analysis["datetime"] = dt.strftime("%Y-%m-%d %H:%M:%S")
-
-                print("\n===== AI ANALYSIS =====")
+                print("\n============ AI ANALYSIS ============")
                 print(analysis)
+                print("START:", start)
+                print("END:", end)
 
-                # Mark the email as read
                 service.users().messages().modify(
                     userId='me',
                     id=msg['id'],
                     body={'removeLabelIds': ['UNREAD']}
                 ).execute()
-            else:
-                print("Skipping email due to LLM error")
 
         except Exception as e:
             print("ERROR:", e)

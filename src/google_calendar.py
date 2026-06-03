@@ -3,16 +3,22 @@ from src.google_calendar_auth import get_creds
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 
+TZ = ZoneInfo("Europe/Berlin")
+
 def get_service():
     creds = get_creds()
     return build("calendar", "v3", credentials=creds)
 
 
-def create_event(title: str, start_iso: str, duration_minutes: int = 30):
+def create_event(title: str, start_iso: str, end_iso: str = None, duration_minutes: int = 30):
     service = get_service()
 
     start = datetime.fromisoformat(start_iso)
-    end = start + timedelta(minutes=duration_minutes)
+
+    if end_iso:
+        end = datetime.fromisoformat(end_iso)
+    else:
+        end = start + timedelta(minutes=duration_minutes)
 
     event = {
         "summary": title,
@@ -81,3 +87,47 @@ def is_time_free(start_iso: str, duration_minutes: int = 30):
             return False
 
     return True
+
+def get_free_slots_for_day(service, target_date, duration_minutes=30):
+    """
+    target_date = datetime (avec date connue)
+    retourne slots de cette journée uniquement
+    """
+
+    start_day = target_date.replace(hour=8, minute=0, second=0, microsecond=0)
+    end_day = target_date.replace(hour=18, minute=0, second=0, microsecond=0)
+
+    events = service.events().list(
+        calendarId="primary",
+        timeMin=start_day.isoformat(),
+        timeMax=end_day.isoformat(),
+        singleEvents=True,
+        orderBy="startTime"
+    ).execute().get("items", [])
+
+    busy = []
+
+    for e in events:
+        if "dateTime" in e["start"]:
+            busy.append((
+                datetime.fromisoformat(e["start"]["dateTime"]),
+                datetime.fromisoformat(e["end"]["dateTime"])
+            ))
+
+    slots = []
+    cursor = start_day
+
+    while cursor < end_day:
+        slot_end = cursor + timedelta(minutes=duration_minutes)
+
+        conflict = any(
+            not (slot_end <= b_start or cursor >= b_end)
+            for b_start, b_end in busy
+        )
+
+        if not conflict:
+            slots.append(cursor)
+
+        cursor += timedelta(minutes=30)
+
+    return slots

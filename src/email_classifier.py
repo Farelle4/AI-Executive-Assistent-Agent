@@ -70,7 +70,9 @@ Return format:
 {{
   "intent": "",
   "confidence": 0-1,
-  "raw_datetime": "",
+  "raw_date": "",
+  "start_raw_time": "",
+  "end_raw_time": "",
   "sender": ""
 }}
 
