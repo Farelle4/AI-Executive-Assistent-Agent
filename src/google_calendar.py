@@ -90,9 +90,10 @@ def is_time_free(start_iso: str, duration_minutes: int = 30):
 
 def get_free_slots_for_day(service, target_date, duration_minutes=30):
     """
-    target_date = datetime (avec date connue)
-    retourne slots de cette journée uniquement
+    target_date = datetime (TZ aware)
     """
+
+    target_date = target_date.astimezone(TZ)
 
     start_day = target_date.replace(hour=8, minute=0, second=0, microsecond=0)
     end_day = target_date.replace(hour=18, minute=0, second=0, microsecond=0)
@@ -110,8 +111,8 @@ def get_free_slots_for_day(service, target_date, duration_minutes=30):
     for e in events:
         if "dateTime" in e["start"]:
             busy.append((
-                datetime.fromisoformat(e["start"]["dateTime"]),
-                datetime.fromisoformat(e["end"]["dateTime"])
+                datetime.fromisoformat(e["start"]["dateTime"]).astimezone(TZ),
+                datetime.fromisoformat(e["end"]["dateTime"]).astimezone(TZ)
             ))
 
     slots = []
@@ -126,7 +127,7 @@ def get_free_slots_for_day(service, target_date, duration_minutes=30):
         )
 
         if not conflict:
-            slots.append(cursor)
+            slots.append(cursor.astimezone(TZ).isoformat())
 
         cursor += timedelta(minutes=30)
 

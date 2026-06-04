@@ -9,6 +9,7 @@ from src.email_classifier import analyze_email
 from zoneinfo import ZoneInfo
 from dateutil import parser
 from dateparser import parse
+from src.draft_response import generate_draft_response
 import re
 import re
 import os
@@ -299,16 +300,6 @@ def extract_event_data(text):
 
     return None
 
-
-
-
-
-
-
-
-
-
-
 def getEmails():
     # Variable creds will store the user access token.
     # If no valid token found, we will create one.
@@ -394,6 +385,7 @@ def getEmails():
             event_data = extract_event_data(clean_text)
 
             analysis = analyze_email(subject, sender, clean_text)
+            print("ANALYSIS =", analysis)
 
             if not analysis or analysis.get("intent") == "error":
                 print("Ignored (LLM error)")
@@ -411,7 +403,7 @@ def getEmails():
             }
 
             intent = analysis.get("intent")
-
+            
             if intent not in valid_intents:
                 print("Ignored non-meeting email")
 
@@ -427,61 +419,80 @@ def getEmails():
                 analysis.update(event_data)
 
             start, end = build_datetime_range(analysis)
-
+            print("DEBUG INTENT:", intent)
+            print("DEBUG START:", start)
+            print("DEBUG END:", end)
 
             # ---------------- LOGIC ----------------
-
+            
             if intent == "meeting_confirmation":
-                if start and end:
+
+                if start:
+
+                    # fallback si end manquant
+                    if not end:
+                        end = start + timedelta(minutes=30)
+
+                    event_title = analysis.get("title") or subject or "Meeting"
+
                     create_event(
-                        title="Meeting confirmation",
+                        title=event_title,
                         start_iso=start.isoformat(),
                         end_iso=end.isoformat()
                     )
+
                     service.users().messages().modify(
                         userId='me',
                         id=msg['id'],
                         body={'removeLabelIds': ['UNREAD']}
                     ).execute()
+
                     print("************* Event created ***************")
+                    print("\n============ AI ANALYSIS ============")
+                    print(analysis)
+                    print("START:", start)
+                    print("END:", end)         
+
+
+            elif intent == "meeting_request":
+
+                    if start:
+
+
+                        # override end if absent
+                        if not end:
+                            end = start + timedelta(minutes=30)
+
+                        if is_time_free(start.isoformat(), duration_minutes=30):
+
+                            create_event(
+                                title=subject,
+                                start_iso=start.isoformat(),
+                                end_iso=end.isoformat()
+                            )
+
+                            service.users().messages().modify(
+                                userId='me',
+                                id=msg['id'],
+                                body={'removeLabelIds': ['UNREAD']}
+                            ).execute()
+
+                            print("+++++++++++ Available → event created ++++++++++++")
+
+                        else:
+                            print("------------ BUSY → rejected ------------")
+
+
                     print("\n============ AI ANALYSIS ============")
                     print(analysis)
                     print("START:", start)
                     print("END:", end)
 
-
-            elif intent == "meeting_request":
-                if start and end:
-
-                    if is_time_free(start.isoformat(), duration_minutes=30):
-
-                        create_event(
-                            title=subject,
-                            start_iso=start.isoformat(),
-                            end_iso=end.isoformat()
-                        )
-
-                        service.users().messages().modify(
-                            userId='me',
-                            id=msg['id'],
-                            body={'removeLabelIds': ['UNREAD']}
-                        ).execute()
-                        print("+++++++++++ Available → event created ++++++++++++")
-
-                    else:
-                        print("------------ BUSY → rejected ----------------")
-
-
-                print("\n============ AI ANALYSIS ============")
-                print(analysis)
-                print("START:", start)
-                print("END:", end)
-
-                service.users().messages().modify(
-                    userId='me',
-                    id=msg['id'],
-                    body={'removeLabelIds': ['UNREAD']}
-                ).execute()
+                    service.users().messages().modify(
+                        userId='me',
+                        id=msg['id'],
+                        body={'removeLabelIds': ['UNREAD']}
+                    ).execute()
 
         except Exception as e:
             print("ERROR:", e)
