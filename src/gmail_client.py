@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from src.google_calendar import create_event, is_time_free
 from src.email_classifier import analyze_email
 from zoneinfo import ZoneInfo
+from datetime import time
 from dateutil import parser
 from dateparser import parse
 from src.draft_response import generate_draft_response
@@ -138,6 +139,70 @@ def resolve_datetime(date_text, time_text):
     return dt
 
 
+import re
+
+def clean_date(text: str):
+    if not text:
+        return None
+
+    text = text.lower()
+
+    # suppression bruit allemand
+    text = text.replace("den", "")
+    text = text.replace(",", " ")
+
+    # normalisation espaces
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
+
+
+def parse_time_only(text: str):
+    if not text:
+        return None
+
+    text = text.lower().strip()
+
+    # cleanup allemand / bruit
+    text = text.replace("uhr", "").strip()
+
+    # -------------------------
+    # 1. AM / PM handling
+    # -------------------------
+    am_pm_match = re.search(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text)
+
+    if am_pm_match:
+        hour = int(am_pm_match.group(1))
+        minute = int(am_pm_match.group(2) or 0)
+        period = am_pm_match.group(3)
+
+        if period == "pm" and hour != 12:
+            hour += 12
+        if period == "am" and hour == 12:
+            hour = 0
+
+        return time(hour=hour, minute=minute)
+
+    # -------------------------
+    # 2. 24h format HH:MM
+    # -------------------------
+    match = re.search(r"(\d{1,2})[:.](\d{2})", text)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        return time(hour=hour, minute=minute)
+
+    # -------------------------
+    # 3. fallback "17h", "5h"
+    # -------------------------
+    match = re.search(r"(\d{1,2})\s*h", text)
+    if match:
+        hour = int(match.group(1))
+        return time(hour=hour, minute=0)
+
+    return None
+
+
 def build_datetime_range(analysis):
     raw_date = analysis.get("raw_date")
     start_time = analysis.get("start_raw_time")
@@ -146,7 +211,7 @@ def build_datetime_range(analysis):
     if not raw_date or not start_time:
         return None, None
 
-    date_part = normalize_datetime(raw_date)
+    date_part = normalize_datetime(clean_date(raw_date))
     time_part = parse_time_only(start_time)
 
     if not date_part or not time_part:
@@ -385,7 +450,6 @@ def getEmails():
             event_data = extract_event_data(clean_text)
 
             analysis = analyze_email(subject, sender, clean_text)
-            print("ANALYSIS =", analysis)
 
             if not analysis or analysis.get("intent") == "error":
                 print("Ignored (LLM error)")
@@ -419,9 +483,6 @@ def getEmails():
                 analysis.update(event_data)
 
             start, end = build_datetime_range(analysis)
-            print("DEBUG INTENT:", intent)
-            print("DEBUG START:", start)
-            print("DEBUG END:", end)
 
             # ---------------- LOGIC ----------------
             
