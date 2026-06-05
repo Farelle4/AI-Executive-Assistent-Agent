@@ -5,11 +5,33 @@ from datetime import datetime, timedelta, timezone
 
 TZ = ZoneInfo("Europe/Berlin")
 
+"""
+    Creates and returns an authenticated Google Calendar API service client.
+
+    This function:
+    - Retrieves valid OAuth credentials
+    - Builds a Google Calendar API v3 service object
+
+    Returns:
+        googleapiclient.discovery.Resource: Google Calendar service instance
+"""
 def get_service():
     creds = get_creds()
     return build("calendar", "v3", credentials=creds)
 
 
+"""
+    Creates a new event in Google Calendar.
+
+    Args:
+        title (str): Event title/summary
+        start_iso (str): Start datetime in ISO format (must be timezone-aware or valid ISO string)
+        end_iso (str, optional): End datetime in ISO format. If not provided, duration is used.
+        duration_minutes (int): Default duration if end time is not provided
+
+    Returns:
+        dict: Status, event link, and event ID from Google Calendar
+"""
 def create_event(title: str, start_iso: str, end_iso: str = None, duration_minutes: int = 30):
     service = get_service()
 
@@ -44,6 +66,15 @@ def create_event(title: str, start_iso: str, end_iso: str = None, duration_minut
     }
 
 
+"""
+    Retrieves upcoming events from the user's primary Google Calendar.
+
+    Args:
+        max_results (int): Maximum number of events to return
+
+    Returns:
+        list: List of upcoming calendar events
+"""
 def list_events(max_results: int = 5):
     service = get_service()
 
@@ -61,7 +92,21 @@ def list_events(max_results: int = 5):
 
 
   
+"""
+    Checks if a time slot is available in Google Calendar.
 
+    This function:
+    - Converts input time to UTC
+    - Queries Google Calendar FreeBusy API
+    - Detects overlapping events
+
+    Args:
+        start_iso (str): Start time in ISO format
+        duration_minutes (int): Duration of the meeting
+
+    Returns:
+        bool: True if slot is free, False if busy
+"""
 def is_time_free(start_iso: str, duration_minutes: int = 30):
     service = get_service()
 
@@ -78,7 +123,7 @@ def is_time_free(start_iso: str, duration_minutes: int = 30):
 
     busy = result["calendars"]["primary"]["busy"]
 
-    # 🔥 IMPORTANT: overlap check, pas juste len()
+    #  IMPORTANT: overlap check, not just len()
     for b in busy:
         b_start = datetime.fromisoformat(b["start"].replace("Z", "+00:00"))
         b_end = datetime.fromisoformat(b["end"].replace("Z", "+00:00"))
@@ -88,6 +133,25 @@ def is_time_free(start_iso: str, duration_minutes: int = 30):
 
     return True
 
+
+
+"""
+    Generates available time slots for a specific day.
+
+    This function:
+    - Fetches existing events for the day
+    - Builds a working window (08:00–18:00)
+    - Splits the day into slots
+    - Removes conflicting slots
+
+    Args:
+        service: Google Calendar API service instance
+        target_date (datetime): Date to analyze (timezone-aware)
+        duration_minutes (int): Slot duration
+
+    Returns:
+        list[str]: List of available ISO datetime slots
+"""
 def get_free_slots_for_day(service, target_date, duration_minutes=30):
     """
     target_date = datetime (TZ aware)

@@ -1,0 +1,38 @@
+# =========================
+# Google APIs
+# =========================
+google-api-python-client==2.137.0
+google-auth==2.33.0
+google-auth-oauthlib==1.2.1
+google-auth-httplib2==0.2.0
+
+# =========================
+# LLM (Groq / OpenAI compatible SDK)
+# =========================
+openai==1.40.6
+
+# =========================
+# Date & Time parsing
+# =========================
+python-dateutil==2.9.0.post0
+dateparser==1.2.0
+
+# timezone support (important for Python < 3.9 or large compatibility)
+pytz==2024.1
+
+# =========================
+# Environment variables
+# =========================
+python-dotenv==1.0.1
+
+# =========================
+# HTTP layer (used internally by Google APIs)
+# =========================
+requests==2.32.3
+urllib3==2.2.2
+
+# =========================
+# Optional but useful (robust parsing / cleaning emails)
+# =========================
+beautifulsoup4==4.12.3
+lxml==5.2.2

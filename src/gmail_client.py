@@ -1,4 +1,3 @@
-# import the required libraries
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -11,6 +10,8 @@ from datetime import time
 from dateutil import parser
 from dateparser import parse
 from src.draft_response import generate_draft_response
+from bs4 import BeautifulSoup
+import json
 import re
 import re
 import os
@@ -55,11 +56,9 @@ MARKETING_KEYWORDS = [
 ]
 
 
-
-
-
 TZ = ZoneInfo("Europe/Berlin")
 
+# Parse time expressions in the email body 
 def parse_time_only(text):
     if not text:
         return None
@@ -71,6 +70,7 @@ def parse_time_only(text):
 
     return parsed.time()
 
+# normalize fuzzy date expressions like "next Monday", "this Friday", etc. into concrete dates
 def normalize_datetime(raw_datetime):
     if not raw_datetime:
         return None
@@ -112,13 +112,31 @@ def normalize_datetime(raw_datetime):
     if not parsed:
         return None
 
-    # fallback hour si vide
+    # fallback hour if empty
     if parsed.hour == 0 and parsed.minute == 0:
         parsed = parsed.replace(hour=DEFAULT_HOUR)
 
     return parsed
 
 
+"""
+    Resolves a natural language date and time into a timezone-aware Python datetime.
+
+    This function:
+    - Combines a date string and a time string into a single expression
+    - Uses dateparser to interpret natural language inputs (e.g. "next week", "samstag")
+    - Supports multiple languages (English, German)
+    - Uses the current time in Europe/Berlin as a reference for relative dates
+    - Ensures the result is timezone-aware and biased toward future dates
+
+    Args:
+        date_text (str): Natural language date input (e.g. "next week", "30 May 2026")
+        time_text (str): Time input (e.g. "17:00", "5pm", "afternoon")
+
+    Returns:
+        datetime | None: A timezone-aware datetime object if parsing succeeds,
+                         otherwise None if input is incomplete or invalid
+"""
 def resolve_datetime(date_text, time_text):
     if not date_text or not time_text:
         return None
@@ -138,9 +156,7 @@ def resolve_datetime(date_text, time_text):
 
     return dt
 
-
-import re
-
+# Extract date and time from email text using regex patterns
 def clean_date(text: str):
     if not text:
         return None
@@ -156,14 +172,14 @@ def clean_date(text: str):
 
     return text
 
-
+# parse time expressions in the email body
 def parse_time_only(text: str):
     if not text:
         return None
 
     text = text.lower().strip()
 
-    # cleanup allemand / bruit
+    # cleanup german
     text = text.replace("uhr", "").strip()
 
     # -------------------------
@@ -202,7 +218,7 @@ def parse_time_only(text: str):
 
     return None
 
-
+# Build a datetime range (start and end) from the LLM analysis output
 def build_datetime_range(analysis):
     raw_date = analysis.get("raw_date")
     start_time = analysis.get("start_raw_time")
@@ -237,6 +253,7 @@ def build_datetime_range(analysis):
     return start, end
 
 
+# Determine if an email should be ignored based on sender, subject, body, headers, and labels
 def should_ignore_email(subject, sender, body, headers, label_ids):
     sender = sender.lower()
     subject = subject.lower()
@@ -269,7 +286,7 @@ def decode_base64(data):
     data = data.replace("-", "+").replace("_", "/")
     return base64.b64decode(data).decode("utf-8", errors="ignore")
 
-
+# Extract the email body, handling multipart emails and different MIME types
 def extract_body(payload):
 
     def walk(part):
@@ -311,8 +328,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar"
 ]
 
-from bs4 import BeautifulSoup
 
+# Clean the email body by removing HTML tags and scripts, returning plain text
 def clean_email_body(html):
     if not html:
         return ""
@@ -326,7 +343,6 @@ def clean_email_body(html):
 
     return " ".join(text.split())
 
-import re
 
 DATE_PATTERNS = [
     # 30.04.2026, 07:40 - 07:50
@@ -339,6 +355,7 @@ DATE_PATTERNS = [
     r"(next\s+\w+.*?\d{1,2}:\d{2})",
 ]
 
+# Extract event data (raw date, start time, end time) from email text using regex patterns
 def extract_event_data(text):
     for pattern in DATE_PATTERNS:
         match = re.search(pattern, text, re.IGNORECASE)
@@ -365,6 +382,7 @@ def extract_event_data(text):
 
     return None
 
+# get emails, analyze them with the LLM, and create calendar events for meeting requests and confirmations
 def getEmails():
     # Variable creds will store the user access token.
     # If no valid token found, we will create one.
@@ -402,6 +420,9 @@ def getEmails():
 
     messages = result.get('messages', [])
 
+    # A list to store the results
+    results = []
+
     # messages is a list of dictionaries where each dictionary contains a message id.
     # iterate through all the messages
     for msg in messages:
@@ -437,6 +458,12 @@ def getEmails():
             if not body:
                 body = "(No body found)"
 
+            # Add the subject, sender and body to the results list
+            results.append({
+                "subject": subject,
+                "from": sender,
+                "body": body
+            })
 
             # Printing the subject, sender's email and message
             print("Subject: ", subject)
@@ -558,5 +585,19 @@ def getEmails():
         except Exception as e:
             print("ERROR:", e)
 
+        #draft = generate_draft_response(
+        #    sender=analysis.get("sender"),
+        #    subject=subject,
+        #    analysis=analysis
+        #)
 
-getEmails()
+        #print("\n========== DRAFT RESPONSE ==========")
+        #print(draft)
+ 
+
+
+    with open("emails.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+
+if __name__ == "__main__":
+    getEmails()
