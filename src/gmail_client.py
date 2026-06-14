@@ -505,7 +505,7 @@ def getEmails():
                 ).execute()
                 continue
 
-            # 🔥 MERGE LLM + RULE ENGINE (IMPORTANT)
+            # MERGE LLM + RULE ENGINE (IMPORTANT)
             if event_data:
                 analysis.update(event_data)
 
@@ -523,19 +523,24 @@ def getEmails():
 
                     event_title = analysis.get("title") or subject or "Meeting"
 
-                    create_event(
-                        title=event_title,
-                        start_iso=start.isoformat(),
-                        end_iso=end.isoformat()
-                    )
+                    if is_time_free(start.isoformat(), duration_minutes=30):
 
-                    service.users().messages().modify(
-                        userId='me',
-                        id=msg['id'],
-                        body={'removeLabelIds': ['UNREAD']}
-                    ).execute()
+                        create_event(
+                            title=event_title,
+                            start_iso=start.isoformat(),
+                            end_iso=end.isoformat()
+                        )
+                        analysis["event_created"] = True
+                        service.users().messages().modify(
+                            userId='me',
+                            id=msg['id'],
+                            body={'removeLabelIds': ['UNREAD']}
+                        ).execute()
+                        print("+++++++++++ Available → event created ++++++++++++")
 
-                    print("************* Event created ***************")
+                    else:
+                        print("------------ BUSY → rejected ------------")
+
                     print("\n============ AI ANALYSIS ============")
                     print(analysis)
                     print("START:", start)
@@ -558,6 +563,7 @@ def getEmails():
                                 start_iso=start.isoformat(),
                                 end_iso=end.isoformat()
                             )
+                            analysis["event_created"] = True
 
                             service.users().messages().modify(
                                 userId='me',
@@ -585,14 +591,14 @@ def getEmails():
         except Exception as e:
             print("ERROR:", e)
 
-        #draft = generate_draft_response(
-        #    sender=analysis.get("sender"),
-        #    subject=subject,
-        #    analysis=analysis
-        #)
+        draft = generate_draft_response(
+            sender=analysis.get("sender"),
+            subject=subject,
+            analysis=analysis
+        )
 
-        #print("\n========== DRAFT RESPONSE ==========")
-        #print(draft)
+        print("\n========== DRAFT RESPONSE ==========")
+        print(draft)
  
 
 
