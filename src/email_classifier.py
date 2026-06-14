@@ -1,33 +1,38 @@
-from openai import OpenAI
+from groq import Groq
 from dotenv import load_dotenv
 import os
 import json
 
 
-load_dotenv()
-client = OpenAI(
-    api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://api.groq.com/openai/v1"
-)
+class EmailClassifier:
 
-IGNORE_SENDERS = [
-    "tiktok",
-    "newsletter",
-    "no-reply",
-    "marketing",
-    "testflight"
-]
+    IGNORE_SENDERS = [
+        "tiktok",
+        "newsletter",
+        "no-reply",
+        "marketing",
+        "testflight"
+    ]
 
+    def __init__(self):
+        load_dotenv()
 
-def analyze_email(subject, sender, body):
+        self.client = Groq(
+            api_key=os.getenv("GROQ_API_KEY")
+        )
 
-    # Mark email as suspicious if sender matches common patterns of unwanted emails
-    is_suspicious_sender = any(
-        word in sender.lower() for word in IGNORE_SENDERS
-    )
-    
-    # Try to extract important informations from the email
-    prompt = f"""
+    # -------------------------
+    # MAIN METHOD
+    # -------------------------
+
+    def analyze_email(self, subject, sender, body):
+
+        # Mark email as suspicious if sender matches patterns
+        is_suspicious_sender = any(
+            word in sender.lower() for word in self.IGNORE_SENDERS
+        )
+
+        prompt = f"""
 You are an AI assistant.
 
 Analyze this email and return ONLY valid JSON.
@@ -64,7 +69,7 @@ Examples:
 - "tomorrow at 3pm"
 - "Friday morning"
 
-If no time is mentioned, return an empty string "".
+If no time is mentioned, return an empty string ""
 
 Return format:
 {{
@@ -82,24 +87,27 @@ From: {sender}
 Body: {body}
 """
 
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "Return ONLY JSON."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0
-    )
+        response = self.client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "Return ONLY JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
 
-    result = response.choices[0].message.content
+        result = response.choices[0].message.content
 
-    # remove markdown fences
-    result = result.replace("```json", "").replace("```", "").strip()
+        # -------------------------
+        # CLEAN OUTPUT
+        # -------------------------
+        result = result.replace("```json", "").replace("```", "").strip()
 
-    try:
-        return json.loads(result)
-    except:
-        return {
-            "intent": "error",
-            "raw": result
-        }
+        try:
+            return json.loads(result)
+
+        except Exception:
+            return {
+                "intent": "error",
+                "raw": result
+            }

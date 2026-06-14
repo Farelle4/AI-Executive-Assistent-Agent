@@ -3,51 +3,48 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar"
-]
 
-"""
-    Handles Google OAuth authentication and returns valid credentials.
+class GoogleAuthClient:
 
-    This function:
-    - Loads existing credentials from token.json if available
-    - Refreshes the token if it is expired
-    - Runs full OAuth login flow if no valid credentials exist
-    - Saves updated credentials back to token.json for future use
+    SCOPES = [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/calendar"
+    ]
 
-    Returns:
-        creds (google.oauth2.credentials.Credentials): Valid Google API credentials
-"""
+    def __init__(self, token_path="token.json", credentials_path="credentials.json"):
+        self.token_path = token_path
+        self.credentials_path = credentials_path
 
-def get_creds():
+    # -------------------------
+    # MAIN METHOD
+    # -------------------------
 
-    # Initialize credentials variable
-    creds = None
+    def get_creds(self):
 
-    # Step 1: Check if a saved token already exists from a previous session
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+        creds = None
 
-    # Step 2: If credentials are missing or invalid, re-authenticate
-    if not creds or not creds.valid:
-
-        # Case 1: Token exists but is expired → try refreshing it
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-
-        # Case 2: No valid token → run full OAuth login flow
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json",
-                SCOPES
+        # Step 1: load existing token
+        if os.path.exists(self.token_path):
+            creds = Credentials.from_authorized_user_file(
+                self.token_path,
+                self.SCOPES
             )
-            creds = flow.run_local_server(port=0)
 
-        # Step 3: Save refreshed or newly created credentials
-        # This avoids re-authentication on next execution
-        with open("token.json", "w") as f:
-            f.write(creds.to_json())
+        # Step 2: refresh or re-auth
+        if not creds or not creds.valid:
 
-    return creds
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    self.credentials_path,
+                    self.SCOPES
+                )
+                creds = flow.run_local_server(port=0)
+
+            # Step 3: save token
+            with open(self.token_path, "w") as f:
+                f.write(creds.to_json())
+
+        return creds
