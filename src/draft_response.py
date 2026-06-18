@@ -1,255 +1,173 @@
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
+import re
+from datetime import datetime
 from dateparser import parse as dateparse
 from dateparser.search import search_dates
 from zoneinfo import ZoneInfo
-from dotenv import load_dotenv
-from groq import Groq
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
 from src.google_calendar import GoogleCalendar
-calendar = GoogleCalendar()
-import os
+
+
+_DRAFT_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", (
+        "You are Farelle Tchoukwe. Write email replies as yourself — a real person, not an AI. "
+        "You MUST write the entire reply in {language}. "
+        "Structure: greeting with the sender's first name, body (1–3 sentences), "
+        "a closing line, then your first name 'Farelle' on its own line. "
+        "Match the tone and formality of the original email."
+    )),
+    ("human", "{message}"),
+])
 
 
 class DraftResponse:
+    """Generates email draft replies via a LangChain LCEL chain."""
 
-    def __init__(self):
+    def __init__(self, model):
         self.TZ = ZoneInfo("Europe/Berlin")
+        self._calendar = GoogleCalendar()
+        # Chain: prompt template → LLM → plain text
+        self._chain = _DRAFT_PROMPT | model | StrOutputParser()
 
-        load_dotenv()
-        self.client = Groq(
-            api_key=os.getenv("GROQ_API_KEY")
-        )
+    def _extract_first_name(self, sender: str) -> str:
+        """Parse first name from 'First Last <email@domain>' or fall back to local-part of email."""
+        match = re.match(r'^([^<\s]+)', sender.strip())
+        if match:
+            name = match.group(1).strip(" \"'")
+            if name and "@" not in name:
+                return name
+        email_match = re.search(r'([^@<\s]+)@', sender)
+        if email_match:
+            return email_match.group(1).capitalize()
+        return ""
 
-    # -------------------------
-    # HELPERS
-    # -------------------------
-
-    def _format_daily_slots(self, slot_groups):
+    def _format_daily_slots(self, slot_groups: list) -> str:
+        """Format a list of {date, slots} groups into a human-readable string."""
         if not slot_groups:
             return "No available slots were found."
-
         lines = []
         for group in slot_groups:
             if group["slots"]:
                 lines.append(f"{group['date']}: {', '.join(group['slots'])}")
             else:
                 lines.append(f"{group['date']}: no slots available")
-
         return "\n".join(lines)
 
-    def _build_start_iso(self, raw_date: str, start_time: str):
+    def _build_start_iso(self, raw_date: str, start_time: str) -> str | None:
+        """Parse a raw date + time string into an ISO 8601 datetime string (Europe/Berlin)."""
         if not raw_date or not start_time:
             return None
-
         combined = f"{raw_date} {start_time}"
-
         parsed = dateparse(
             combined,
-            settings={
-                "PREFER_DATES_FROM": "future",
-                "TIMEZONE": "Europe/Berlin",
-                "RETURN_AS_TIMEZONE_AWARE": True
-            }
+            settings={"PREFER_DATES_FROM": "future", "TIMEZONE": "Europe/Berlin", "RETURN_AS_TIMEZONE_AWARE": True},
         )
-
         if parsed:
             return parsed.astimezone(self.TZ).isoformat()
-
-        search_result = search_dates(
+        results = search_dates(
             combined,
-            settings={
-                "PREFER_DATES_FROM": "future",
-                "TIMEZONE": "Europe/Berlin",
-                "RETURN_AS_TIMEZONE_AWARE": True
-            }
+            settings={"PREFER_DATES_FROM": "future", "TIMEZONE": "Europe/Berlin", "RETURN_AS_TIMEZONE_AWARE": True},
         )
-
-        if search_result:
-            _, parsed = search_result[0]
+        if results:
+            _, parsed = results[0]
             if parsed:
                 return parsed.astimezone(self.TZ).isoformat()
-
         return None
 
-    # -------------------------
-    # MAIN FUNCTION
-    # -------------------------
+    def _call_llm(self, message: str, language: str = "English") -> str:
+        """Invoke the LCEL draft chain with the given message and target language."""
+        return self._chain.invoke({"language": language, "message": message})
 
-    def generate_draft_response(self, sender, subject, analysis):
-
+    def generate_draft_response(self, sender: str, subject: str, analysis: dict, body: str = "") -> str:
+        """Build a context-aware draft reply based on meeting analysis."""
         sender = sender or "Sender"
         subject = subject or "Meeting request"
         analysis = analysis or {}
+        body = body or ""
 
-        raw_date = analysis.get("raw_date")
-        start_time = analysis.get("start_raw_time")
-        start_iso = analysis.get("start_iso")
-        end_iso = analysis.get("end_iso")
+        raw_date = analysis.get("raw_date") or ""
+        start_time = analysis.get("start_raw_time") or ""
+        start_iso = analysis.get("start_iso") or ""
+        end_iso = analysis.get("end_iso") or ""
+        language = analysis.get("language") or "English"
 
         if not start_iso and raw_date and start_time:
             start_iso = self._build_start_iso(raw_date, start_time)
 
-        prompt = None
+        first_name = self._extract_first_name(sender)
+        original_email = f"From: {sender}\nSubject: {subject}\n\n{body}".strip()
 
-        # =========================================================
-        # EVENT CONFIRMED
-        # =========================================================
-        if analysis.get("event_created") and start_time and raw_date:
-            prompt = f"""
-You are Farelle Tchoukwe, responding to {sender} to confirm a meeting.
-
-The meeting has been scheduled for: {start_time} on {raw_date}
-
-Write a short, professional email response in the same language as the sender that:
-- Confirms the meeting date and time
-- Is brief and professional (like a real person responding)
-- Does NOT invent or assume what the meeting is about
-- Does NOT add opinions or enthusiasm about projects/opportunities not mentioned
-- Maintains CONSISTENT formality level throughout (use either formal or informal, NOT MIXED)
-- Ends with your name: Farelle Tchoukwe
-
-Return ONLY the email body.
-"""
-
-        # =========================================================
-        # INCOMPLETE DATE/TIME
-        # =========================================================
-        elif not raw_date or not start_time or not start_iso:
-            prompt = f"""
-You are Farelle Tchoukwe, responding to an email from {sender}.
-
-The sender's message is about scheduling, but they haven't provided a specific date and/or time that can be resolved.
-
-Write a short, friendly email response in the same language as the sender that:
-- Thanks them for reaching out
-- Politely asks for a specific date and time to schedule
-- Keeps it brief and natural (like a real person responding)
-- Does NOT invent or assume what the meeting is about
-- Does NOT add opinions or enthusiasm about projects/opportunities not mentioned
-- Maintains CONSISTENT formality level throughout (use either formal or informal, NOT MIXED)
-- Ends with your name: Farelle Tchoukwe
-
-Return ONLY the email body.
-"""
-
-        # =========================================================
-        # PRECISE DATE + TIME
-        # =========================================================
-        elif start_time and raw_date and start_iso:
-
-            service = calendar.get_service()
-
-            if start_iso:
-                try:
-                    is_free = calendar.is_time_free(start_iso)
-                except Exception:
-                    is_free = None
-
-                if is_free is False:
-
-                    parsed_start = None
-                    try:
-                        parsed_start = datetime.fromisoformat(start_iso).astimezone(self.TZ)
-                    except Exception:
-                        parsed_start = datetime.now(self.TZ)
-
-                    slots = calendar.get_free_slots_for_day(
-                        service,
-                        target_date=parsed_start,
-                        duration_minutes=30
-                    )
-
-                    available_slots_text = self._format_daily_slots([
-                        {"date": parsed_start.date().isoformat(), "slots": slots}
-                    ])
-
-                    prompt = f"""
-You are Farelle Tchoukwe, responding to {sender} about a scheduling conflict.
-
-The requested time {start_time} is not available. Here are alternative times on that day:
-{available_slots_text}
-
-Write a short, professional email response in the same language as the sender that:
-- Politely explains the requested time is not available
-- Suggests the alternative times
-- Asks them to pick one that works
-- Is brief and friendly (like a real person responding)
-- Does NOT invent or assume what the meeting is about
-- Maintains CONSISTENT formality level throughout (use either formal or informal, NOT MIXED)
-- Ends with your name: Farelle Tchoukwe
-
-Return ONLY the email body.
-"""
-
-                elif is_free is True:
-
-                    calendar.create_event(
-                        title=subject,
-                        start_iso=start_iso,
-                        end_iso=end_iso
-                    )
-
-                    prompt = f"""
-You are Farelle Tchoukwe, responding to {sender} to confirm a meeting.
-
-The meeting has been scheduled for: {start_time} on {raw_date}
-
-Write a short, professional email response in the same language as the sender that:
-- Confirms the meeting date and time
-- Does NOT express enthusiasm or excitement about the meeting
-- Is brief and professional (like a real person responding)
-- Does NOT invent or assume what the meeting is about
-- Does NOT add opinions or enthusiasm about projects/opportunities not mentioned
-- Maintains CONSISTENT formality level throughout (use either formal or informal, NOT MIXED)
-- Ends with your name: Farelle Tchoukwe
-
-Return ONLY the email body.
-"""
-
-                else:
-                    prompt = f"""
-You are Farelle Tchoukwe, responding to an email from {sender}.
-
-The message is about scheduling, but something is unclear.
-
-Write a short, professional email response in the same language as the sender that:
-- Thanks them for reaching out
-- Politely asks for clarification on the date or time
-- Is brief and friendly (like a real person responding)
-- Does NOT invent or assume what the meeting is about
-- Maintains CONSISTENT formality level throughout (use either formal or informal, NOT MIXED)
-- Ends with your name: Farelle Tchoukwe
-
-Return ONLY the email body.
-"""
-
-        # =========================================================
-        # FALLBACK
-        # =========================================================
-        else:
-            prompt = f"""
-You are Farelle Tchoukwe, responding to an email from {sender}.
-
-The message is about scheduling.
-
-Write a short, professional email response in the same language as the sender that:
-- Thanks them for reaching out
-- Politely asks for a date and time to schedule
-- Is brief and friendly (like a real person responding)
-- Does NOT invent or assume what the meeting is about
-- Maintains CONSISTENT formality level throughout (use either formal or informal, NOT MIXED)
-- Ends with your name: Farelle Tchoukwe
-
-Return ONLY the email body.
-"""
-
-        response = self.client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": "You are a scheduling assistant."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.4
+        structure_rule = (
+            f'1. Greeting using the sender\'s first name: "{first_name}"\n'
+            f"2. The message body (1–3 sentences max, natural and direct)\n"
+            f"3. A closing line appropriate for {language}\n"
+            f"4. Your first name on a new line: Farelle\n\n"
+            f"Return only the email body — nothing else."
         )
 
-        return response.choices[0].message.content
+        # Meeting confirmed: event was already added to the calendar in the orchestrator
+        if analysis.get("event_created") and raw_date and start_time:
+            return self._call_llm(f"""You received this email:
+---
+{original_email}
+---
+
+You just added the meeting to your calendar: {start_time} on {raw_date}.
+Write a short reply confirming this works for you.
+
+{structure_rule}""", language=language)
+
+        # Date/time present: check calendar and either confirm or propose alternatives
+        if start_iso and start_time and raw_date:
+            try:
+                is_free = self._calendar.is_time_free(start_iso)
+            except Exception:
+                is_free = None
+
+            if is_free is False:
+                try:
+                    parsed_start = datetime.fromisoformat(start_iso).astimezone(self.TZ)
+                except Exception:
+                    parsed_start = datetime.now(self.TZ)
+
+                service = self._calendar.get_service()
+                slots = self._calendar.get_free_slots_for_day(
+                    service, target_date=parsed_start, duration_minutes=30
+                )
+                available_slots_text = self._format_daily_slots(
+                    [{"date": parsed_start.date().isoformat(), "slots": slots}]
+                )
+                return self._call_llm(f"""You received this email:
+---
+{original_email}
+---
+
+{start_time} on {raw_date} doesn't work for you. You're free at these times instead:
+{available_slots_text}
+
+Write a brief reply saying that time doesn't work and suggesting one of those alternatives.
+
+{structure_rule}""", language=language)
+
+            if is_free is True:
+                self._calendar.create_event(title=subject, start_iso=start_iso, end_iso=end_iso)
+                return self._call_llm(f"""You received this email:
+---
+{original_email}
+---
+
+You just added the meeting to your calendar: {start_time} on {raw_date}.
+Write a short reply confirming this works for you.
+
+{structure_rule}""", language=language)
+
+        # No date or time: ask the sender when they're free
+        return self._call_llm(f"""You received this email:
+---
+{original_email}
+---
+
+They want to meet but haven't given a specific date and/or time.
+Write a short reply asking when they're free.
+
+{structure_rule}""", language=language)

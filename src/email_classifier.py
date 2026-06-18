@@ -1,113 +1,47 @@
-from groq import Groq
-from dotenv import load_dotenv
-import os
-import json
+from pydantic import BaseModel, Field
+from langchain_core.prompts import ChatPromptTemplate
 
 
-class EmailClassifier:
+class EmailClassification(BaseModel):
+    """Pydantic schema for structured LLM output from email classification."""
+    intent: str = Field(
+        description="One of: meeting_request, meeting_confirmation, meeting_cancellation, information_request, other"
+    )
+    confidence: float = Field(description="Confidence score between 0 and 1")
+    raw_date: str = Field(default="", description="Date as written in the email, e.g. 'next Monday', '14 juin'")
+    start_raw_time: str = Field(default="", description="Start time as written, e.g. '2pm', '14:00'")
+    end_raw_time: str = Field(default="", description="End time as written, e.g. '3pm', '15:00'")
+    language: str = Field(default="English", description="Language of the email body, e.g. 'English', 'French'")
 
-    IGNORE_SENDERS = [
-        "tiktok",
-        "newsletter",
-        "no-reply",
-        "marketing",
-        "testflight"
-    ]
 
-    def __init__(self):
-        load_dotenv()
+_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "You are an email classifier. Analyze the email below and return structured output."),
+    ("human", """Classify this email:
 
-        self.client = Groq(
-            api_key=os.getenv("GROQ_API_KEY")
-        )
-
-    # -------------------------
-    # MAIN METHOD
-    # -------------------------
-
-    def analyze_email(self, subject, sender, body):
-
-        # Mark email as suspicious if sender matches patterns
-        is_suspicious_sender = any(
-            word in sender.lower() for word in self.IGNORE_SENDERS
-        )
-
-        prompt = f"""
-You are an AI assistant.
-
-Analyze this email and return ONLY valid JSON.
-
-TASK:
-1. Classify intent
-2. If it's a meeting, extract date and time
-
-INTENTS:
-- meeting_request
-- meeting_confirmation
-- meeting_cancellation
-- information_request
-- other
-
-IMPORTANT:
-Do NOT classify emails as irrelevant only because the sender contains:
-- no-reply
-- noreply
-- automated systems
-
-Many important meeting confirmations come from such senders (Doctolib, Calendly, Google Calendar).
-
-CRITICAL RULE:
-- DO NOT calculate dates
-- DO NOT convert dates
-- DO NOT interpret dates
-- ONLY copy the exact text that refers to time
-- Return temporal expressions in English only (e.g. "next Monday", "tomorrow", "Friday 3pm")
-- If a full date is present (day + month + year), ALWAYS use it.
-
-Examples:
-- "next Monday"
-- "tomorrow at 3pm"
-- "Friday morning"
-
-If no time is mentioned, return an empty string ""
-
-Return format:
-{{
-  "intent": "",
-  "confidence": 0-1,
-  "raw_date": "",
-  "start_raw_time": "",
-  "end_raw_time": "",
-  "sender": ""
-}}
-
-EMAIL:
 Subject: {subject}
 From: {sender}
 Body: {body}
-"""
 
-        response = self.client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "Return ONLY JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0
-        )
+Rules:
+- Do NOT filter based on no-reply senders — meeting confirmations from Doctolib, Calendly, or Google Calendar often come from automated addresses.
+- Copy date and time expressions exactly as written — do not calculate, convert, or interpret them.
+- Detect the language from the email body (full name in English, e.g. "French", "German").
+- If no date or time is mentioned, return empty strings for raw_date and start_raw_time."""),
+])
 
-        result = response.choices[0].message.content
 
-        # -------------------------
-        # CLEAN OUTPUT
-        # -------------------------
-        result = result.replace("```json", "").replace("```", "").strip()
+class EmailClassifier:
+    """Classifies email intent and extracts meeting date/time via a LangChain LCEL chain."""
 
-        try:
-            return json.loads(result)
+    def __init__(self, model):
+        # Bind structured output so the response is validated against EmailClassification
+        self._chain = _PROMPT | model.with_structured_output(EmailClassification)
 
-        except Exception:
-            return {
-                "intent": "error",
-                "raw": result
-            }
+    def analyze_email(self, subject: str, sender: str, body: str) -> dict:
+        """Return a dict with intent, confidence, raw_date, start_raw_time, end_raw_time, language."""
+        result = self._chain.invoke({
+            "subject": subject,
+            "sender": sender,
+            "body": body,
+        })
+        return result.model_dump()

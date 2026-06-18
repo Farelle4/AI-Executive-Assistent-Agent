@@ -1,38 +1,60 @@
 # =========================
 # Google APIs
 # =========================
-google-api-python-client==2.137.0
-google-auth==2.33.0
-google-auth-oauthlib==1.2.1
-google-auth-httplib2==0.2.0
+google-api-python-client>=2.137.0
+google-auth>=2.33.0
+google-auth-oauthlib>=1.2.1
+google-auth-httplib2>=0.2.0
 
 # =========================
-# LLM (Groq / OpenAI compatible SDK)
+# LangChain + LangGraph (agent + LCEL chains)
 # =========================
-openai==1.40.6
+langchain>=1.2.0
+langchain-core>=1.4.0
+langchain-groq>=1.1.0       # Groq provider for init_chat_model
+langchain-openai>=1.2.0     # OpenAI provider for init_chat_model
+langgraph>=1.1.0            # create_agent + graph runtime
+
+# =========================
+# LLM provider SDKs (used by langchain-groq / langchain-openai)
+# =========================
+groq>=0.37.0
+openai>=2.0.0
+
+# =========================
+# MCP server (Google Calendar MCP)
+# =========================
+mcp>=1.27.0
+
+# =========================
+# Database (Supabase memory)
+# =========================
+supabase>=2.0.0
+
+# =========================
+# Testing
+# =========================
+pytest>=9.0.0
 
 # =========================
 # Date & Time parsing
 # =========================
-python-dateutil==2.9.0.post0
-dateparser==1.2.0
-
-# timezone support (important for Python < 3.9 or large compatibility)
-pytz==2024.1
+python-dateutil>=2.9.0
+dateparser>=1.2.0
+pytz>=2024.1
 
 # =========================
 # Environment variables
 # =========================
-python-dotenv==1.0.1
+python-dotenv>=1.0.0
 
 # =========================
-# HTTP layer (used internally by Google APIs)
+# HTTP layer
 # =========================
-requests==2.32.3
-urllib3==2.2.2
+requests>=2.32.0
+urllib3>=2.2.0
 
 # =========================
-# Optional but useful (robust parsing / cleaning emails)
+# Email body parsing
 # =========================
-beautifulsoup4==4.12.3
-lxml==5.2.2
+beautifulsoup4>=4.12.0

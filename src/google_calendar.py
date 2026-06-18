@@ -1,121 +1,71 @@
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from googleapiclient.discovery import build
 from src.google_calendar_auth import GoogleAuthClient
-calendarAuth = GoogleAuthClient()
-from zoneinfo import ZoneInfo
-from datetime import datetime, timedelta, timezone
+
+_auth = GoogleAuthClient()
 
 
 class GoogleCalendar:
+    """Wrapper around the Google Calendar API for event management and free/busy queries."""
 
     TZ = ZoneInfo("Europe/Berlin")
 
-    def __init__(self):
-        pass
-
-    # -------------------------
-    # SERVICE
-    # -------------------------
-
     def get_service(self):
-        creds = calendarAuth.get_creds()
-        return build("calendar", "v3", credentials=creds)
+        """Return an authenticated Google Calendar API service client."""
+        return build("calendar", "v3", credentials=_auth.get_creds())
 
-    # -------------------------
-    # CREATE EVENT
-    # -------------------------
-
-    def create_event(self, title: str, start_iso: str, end_iso: str = None, duration_minutes: int = 30):
-
+    def create_event(self, title: str, start_iso: str, end_iso: str = None, duration_minutes: int = 30) -> dict:
+        """Create a calendar event. If end_iso is omitted, defaults to start + duration_minutes."""
         service = self.get_service()
-
         start = datetime.fromisoformat(start_iso)
-
-        if end_iso:
-            end = datetime.fromisoformat(end_iso)
-        else:
-            end = start + timedelta(minutes=duration_minutes)
+        end = datetime.fromisoformat(end_iso) if end_iso else start + timedelta(minutes=duration_minutes)
 
         event = {
             "summary": title,
-            "start": {
-                "dateTime": start.isoformat(),
-                "timeZone": "Europe/Berlin",
-            },
-            "end": {
-                "dateTime": end.isoformat(),
-                "timeZone": "Europe/Berlin",
-            },
+            "start": {"dateTime": start.isoformat(), "timeZone": "Europe/Berlin"},
+            "end": {"dateTime": end.isoformat(), "timeZone": "Europe/Berlin"},
         }
+        created = service.events().insert(calendarId="primary", body=event).execute()
+        return {"status": "success", "event_link": created.get("htmlLink"), "id": created.get("id")}
 
-        created = service.events().insert(
-            calendarId="primary",
-            body=event
-        ).execute()
-
-        return {
-            "status": "success",
-            "event_link": created.get("htmlLink"),
-            "id": created.get("id")
-        }
-
-    # -------------------------
-    # LIST EVENTS
-    # -------------------------
-
-    def list_events(self, max_results: int = 5):
-
+    def list_events(self, max_results: int = 5) -> list:
+        """Return upcoming calendar events ordered by start time."""
         service = self.get_service()
-
-        now = datetime.utcnow().isoformat() + "Z"
-
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         events = service.events().list(
             calendarId="primary",
             timeMin=now,
             maxResults=max_results,
             singleEvents=True,
-            orderBy="startTime"
+            orderBy="startTime",
         ).execute()
-
         return events.get("items", [])
 
-    # -------------------------
-    # CHECK FREE SLOT
-    # -------------------------
-
-    def is_time_free(self, start_iso: str, duration_minutes: int = 30):
-
+    def is_time_free(self, start_iso: str, duration_minutes: int = 30) -> bool:
+        """Return True if the calendar has no events overlapping [start, start + duration_minutes)."""
         service = self.get_service()
-
         start = datetime.fromisoformat(start_iso).astimezone(timezone.utc)
         end = start + timedelta(minutes=duration_minutes)
 
         body = {
             "timeMin": start.isoformat().replace("+00:00", "Z"),
             "timeMax": end.isoformat().replace("+00:00", "Z"),
-            "items": [{"id": "primary"}]
+            "items": [{"id": "primary"}],
         }
-
         result = service.freebusy().query(body=body).execute()
-
         busy = result["calendars"]["primary"]["busy"]
 
         for b in busy:
             b_start = datetime.fromisoformat(b["start"].replace("Z", "+00:00"))
             b_end = datetime.fromisoformat(b["end"].replace("Z", "+00:00"))
-
             if start < b_end and end > b_start:
                 return False
-
         return True
 
-    # -------------------------
-    # FREE SLOTS GENERATION
-    # -------------------------
-
-    def get_free_slots_for_day(self, service, target_date, duration_minutes=30):
-
+    def get_free_slots_for_day(self, service, target_date: datetime, duration_minutes: int = 30) -> list[str]:
+        """Return ISO strings of free 30-minute slots between 08:00 and 18:00 on target_date."""
         target_date = target_date.astimezone(self.TZ)
-
         start_day = target_date.replace(hour=8, minute=0, second=0, microsecond=0)
         end_day = target_date.replace(hour=18, minute=0, second=0, microsecond=0)
 
@@ -124,32 +74,26 @@ class GoogleCalendar:
             timeMin=start_day.isoformat(),
             timeMax=end_day.isoformat(),
             singleEvents=True,
-            orderBy="startTime"
+            orderBy="startTime",
         ).execute().get("items", [])
 
-        busy = []
+        # Build list of busy intervals
+        busy = [
+            (
+                datetime.fromisoformat(e["start"]["dateTime"]).astimezone(self.TZ),
+                datetime.fromisoformat(e["end"]["dateTime"]).astimezone(self.TZ),
+            )
+            for e in events
+            if "dateTime" in e["start"]
+        ]
 
-        for e in events:
-            if "dateTime" in e["start"]:
-                busy.append((
-                    datetime.fromisoformat(e["start"]["dateTime"]).astimezone(self.TZ),
-                    datetime.fromisoformat(e["end"]["dateTime"]).astimezone(self.TZ)
-                ))
-
+        # Walk through the day in 30-minute increments and collect free slots
         slots = []
         cursor = start_day
-
         while cursor < end_day:
             slot_end = cursor + timedelta(minutes=duration_minutes)
-
-            conflict = any(
-                not (slot_end <= b_start or cursor >= b_end)
-                for b_start, b_end in busy
-            )
-
-            if not conflict:
+            if not any(not (slot_end <= b_start or cursor >= b_end) for b_start, b_end in busy):
                 slots.append(cursor.astimezone(self.TZ).isoformat())
-
             cursor += timedelta(minutes=30)
 
         return slots
