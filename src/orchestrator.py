@@ -2,7 +2,10 @@ import json
 import logging
 import os
 
+from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
+
+load_dotenv()
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 

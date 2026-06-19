@@ -2,7 +2,7 @@ import argparse
 import logging
 import time
 
-import config  # noqa: F401 — triggers logging basicConfig
+import config 
 from src.orchestrator import AgentOrchestrator
 
 logger = logging.getLogger(__name__)
