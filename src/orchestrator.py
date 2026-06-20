@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
@@ -39,17 +40,19 @@ STEP 4 — Route:
       - Otherwise: call mark_as_read(email_id), call save_to_memory(email_id, subject, sender, intent, "IGNORED"), STOP.
   → Otherwise continue to step 5.
 
-STEP 5 — Calendar (only if intent != "meeting_cancellation" AND raw_date and start_raw_time are not empty):
-  → call book_calendar(subject, raw_date, start_raw_time, end_raw_time)
-  → Note whether event_created is True or False.
+STEP 5 — Check calendar (only if intent != "meeting_cancellation" AND raw_date and start_raw_time are not empty):
+  → call check_calendar(subject, raw_date, start_raw_time, end_raw_time)
+  → Note is_free, start_iso, end_iso.
 
-STEP 6 — Draft: call generate_draft(sender, subject, body, intent, raw_date, start_raw_time, end_raw_time, language, event_created).
+STEP 6 — Draft: call generate_draft(sender, subject, body, intent, raw_date, start_raw_time, end_raw_time, language, event_created=<is_free from step 5>).
   → Use the preferred name from user_context in the greeting if available.
 
-STEP 7 — Save draft: call save_draft(to=sender, subject=subject, draft_body=<text from step 6>).
+STEP 7 — Save draft: call save_draft(to=sender, subject=subject, draft_body=<text from step 6>, thread_id=<thread_id from the email>, message_id=<message_id from the email>, start_iso=<start_iso from step 5 if is_free was True, else "">, end_iso=<end_iso from step 5 if is_free was True, else "">).
+  → Always pass thread_id and message_id. Pass start_iso and end_iso only when confirming a meeting (is_free=True).
 
-STEP 8 — Update user memory: call save_user_memory with any new information learned about this contact
-  (name, language, VIP status, or relevant notes). Only call this if you learned something new.
+STEP 8 — Update user memory: ALWAYS call save_user_memory for the sender, even if user_context was already known.
+  Use the name extracted from the sender header, the language detected in step 3, the is_vip flag from user_context (default False), and any relevant notes.
+  This ensures every contact has an up-to-date profile in memory.
 
 STEP 9 — Mark read: call mark_as_read(email_id).
 
@@ -76,10 +79,12 @@ class AgentOrchestrator:
 
         # Service instances used inside the tool closures below
         self._gmail = GmailClient()
-        _memory = MemoryClient()
+        self._memory = MemoryClient()
+        self._calendar = GoogleCalendar()
+        _memory = self._memory
+        _calendar = self._calendar
         _classifier = EmailClassifier(classifier_model)
         _responder = DraftResponse(draft_model)
-        _calendar = GoogleCalendar()
 
         # ── Tool definitions ───────────────────────────────────────────────────
         # Each tool is a closure over the service singletons above.
@@ -95,24 +100,25 @@ class AgentOrchestrator:
             return _classifier.analyze_email(subject, sender, body)
 
         @tool
-        def book_calendar(
+        def check_calendar(
             subject: str,
             raw_date: str,
             start_raw_time: str,
             end_raw_time: str = "",
         ) -> dict:
-            """Parse date/time and create a calendar event if the slot is free.
+            """Check calendar availability for a requested time slot.
 
-            Returns {"event_created": bool, "start_iso": str}.
+            Returns {"is_free": bool, "start_iso": str, "end_iso": str}.
+            Does NOT create any event.
             """
             start_iso = _responder._build_start_iso(raw_date, start_raw_time)
             if not start_iso:
-                return {"event_created": False, "start_iso": ""}
+                logger.warning("check_calendar: could not parse date/time — raw_date=%r start_raw_time=%r", raw_date, start_raw_time)
+                return {"is_free": False, "start_iso": "", "end_iso": ""}
             end_iso = _responder._build_start_iso(raw_date, end_raw_time) if end_raw_time else ""
-            if _calendar.is_time_free(start_iso):
-                _calendar.create_event(title=subject, start_iso=start_iso, end_iso=end_iso)
-                return {"event_created": True, "start_iso": start_iso}
-            return {"event_created": False, "start_iso": start_iso}
+            is_free = _calendar.is_time_free(start_iso)
+            logger.info("check_calendar: start_iso=%s is_free=%s", start_iso, is_free)
+            return {"is_free": is_free, "start_iso": start_iso, "end_iso": end_iso}
 
         @tool
         def generate_draft(
@@ -136,13 +142,45 @@ class AgentOrchestrator:
                 "event_created": event_created,
             }
             return _responder.generate_draft_response(
-                sender=sender, subject=subject, analysis=analysis, body=body
+                sender=sender, subject=subject, analysis=analysis, body=body,
             )
 
         @tool
-        def save_draft(to: str, subject: str, draft_body: str) -> str:
-            """Save a reply draft to Gmail. Returns the draft ID."""
-            return self._gmail.save_draft(to=to, subject=f"Re: {subject}", body=draft_body)
+        def save_draft(
+            to: str,
+            subject: str,
+            draft_body: str,
+            thread_id: str = "",
+            message_id: str = "",
+            start_iso: str = "",
+            end_iso: str = "",
+        ) -> str:
+            """Save a reply draft to Gmail inside the original conversation thread.
+
+            Pass thread_id and message_id so the draft appears as a reply.
+            Pass start_iso (and optionally end_iso) when confirming a meeting —
+            the pending calendar event is saved automatically so it can be created
+            once the human sends the email.
+            Returns the draft ID.
+            """
+            draft_id = self._gmail.save_draft(
+                to=to,
+                subject=f"Re: {subject}",
+                body=draft_body,
+                thread_id=thread_id,
+                message_id=message_id,
+            )
+            if thread_id and start_iso:
+                if not end_iso:
+                    end_iso = (datetime.fromisoformat(start_iso) + timedelta(minutes=30)).isoformat()
+                _memory.save_pending_event(
+                    thread_id=thread_id,
+                    subject=subject,
+                    start_iso=start_iso,
+                    end_iso=end_iso,
+                )
+                logger.info("save_draft: pending event stored for thread=%s at %s", thread_id, start_iso)
+            return draft_id
 
         @tool
         def mark_as_read(email_id: str) -> str:
@@ -182,12 +220,12 @@ class AgentOrchestrator:
         # Build the ReAct agent: model + tools + system prompt
         self._agent = create_agent(
             model=agent_model,
-            name="AI Executive Assistant Agent",
+            name="AI_Executive_Assistant_Agent",
             tools=[
                 check_if_processed,
                 get_user_context,
                 classify_email,
-                book_calendar,
+                check_calendar,
                 generate_draft,
                 save_draft,
                 save_user_memory,
@@ -214,3 +252,53 @@ class AgentOrchestrator:
         for email in emails:
             self.run(email)
         return len(emails)
+
+    def run_sent_batch(self) -> int:
+        """Scan recently sent emails and create calendar events for confirmed meetings.
+
+        When the human sends a draft reply, Gmail places it in Sent. This method
+        checks each sent thread against pending_event records and creates the
+        calendar event if a match is found.
+        Returns the number of events created.
+        """
+        sent = self._gmail.get_recently_sent(max_results=20)
+        logger.info("run_sent_batch: scanning %d sent messages", len(sent))
+        created = 0
+        for msg in sent:
+            thread_id = msg.get("thread_id", "")
+            logger.debug("run_sent_batch: checking thread_id=%s subject=%r", thread_id, msg.get("subject"))
+            if not thread_id:
+                continue
+            pending = self._memory.get_pending_event(thread_id)
+            if not pending:
+                logger.debug("run_sent_batch: no pending event for thread_id=%s", thread_id)
+                continue
+
+            # Only proceed if the sent email was sent AFTER the pending event was created
+            pending_created_at = pending.get("created_at", "")
+            sent_at = msg.get("sent_at", 0)
+            if pending_created_at and sent_at:
+                pending_ts = datetime.fromisoformat(pending_created_at).astimezone(timezone.utc).timestamp()
+                if sent_at < pending_ts:
+                    logger.debug("run_sent_batch: sent email predates pending event, skipping thread_id=%s", thread_id)
+                    continue
+
+            logger.info("run_sent_batch: found pending event for thread_id=%s — %s", thread_id, pending)
+            try:
+                details = json.loads(pending["notes"])
+                start_iso = details.get("start_iso", "")
+                end_iso = details.get("end_iso", "")
+                if not start_iso:
+                    logger.warning("run_sent_batch: pending event for thread=%s has no start_iso", thread_id)
+                    continue
+                self._calendar.create_event(
+                    title=pending["subject"],
+                    start_iso=start_iso,
+                    end_iso=end_iso,
+                )
+                self._memory.mark_event_created(thread_id)
+                logger.info("run_sent_batch: calendar event created for thread=%s ('%s')", thread_id, pending["subject"])
+                created += 1
+            except Exception as e:
+                logger.error("run_sent_batch: failed for thread=%s: %s", thread_id, e)
+        return created

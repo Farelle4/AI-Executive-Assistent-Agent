@@ -1,9 +1,11 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from googleapiclient.discovery import build
 from src.google_calendar_auth import GoogleAuthClient
 
 _auth = GoogleAuthClient()
+logger = logging.getLogger(__name__)
 
 
 class GoogleCalendar:
@@ -56,11 +58,10 @@ class GoogleCalendar:
         result = service.freebusy().query(body=body).execute()
         busy = result["calendars"]["primary"]["busy"]
 
-        for b in busy:
-            b_start = datetime.fromisoformat(b["start"].replace("Z", "+00:00"))
-            b_end = datetime.fromisoformat(b["end"].replace("Z", "+00:00"))
-            if start < b_end and end > b_start:
-                return False
+        if busy:
+            logger.info("is_time_free: slot %s–%s is BUSY — conflicting events: %s", start, end, busy)
+            return False
+        logger.info("is_time_free: slot %s–%s is free", start, end)
         return True
 
     def get_free_slots_for_day(self, service, target_date: datetime, duration_minutes: int = 30) -> list[str]:

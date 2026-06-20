@@ -47,8 +47,20 @@ class GmailClient:
 
                 subject = next((h["value"] for h in headers if h["name"] == "Subject"), "")
                 sender = next((h["value"] for h in headers if h["name"] == "From"), "")
+                date = next((h["value"] for h in headers if h["name"] == "Date"), "")
+                message_id = next((h["value"] for h in headers if h["name"] == "Message-ID"), "").strip()
+                if message_id and not message_id.startswith("<"):
+                    message_id = f"<{message_id}>"
                 body = self.clean_email_body(self.extract_body(payload) or "")
-                emails.append({"id": msg["id"], "subject": subject, "from": sender, "body": body})
+                emails.append({
+                    "id": msg["id"],
+                    "thread_id": txt.get("threadId", ""),
+                    "message_id": message_id,
+                    "subject": subject,
+                    "from": sender,
+                    "date": date,
+                    "body": body,
+                })
             except Exception as e:
                 logger.warning("Failed to parse message %s: %s", msg.get("id"), e)
 
@@ -61,17 +73,56 @@ class GmailClient:
             userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
         ).execute()
 
-    def save_draft(self, to: str, subject: str, body: str) -> str:
-        """Create a Gmail draft and return its draft ID."""
+    def save_draft(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        thread_id: str = "",
+        message_id: str = "",
+    ) -> str:
+        """Create a Gmail draft and return its draft ID.
+
+        When thread_id and message_id are provided the draft is attached to the
+        existing conversation thread so Gmail shows it as a reply, not a new message.
+        """
         service = self.get_service()
         msg = email.mime.text.MIMEText(body, "plain", "utf-8")
         msg["To"] = to
         msg["Subject"] = subject
+        if message_id:
+            msg["In-Reply-To"] = message_id
+            msg["References"] = message_id
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+        message_body: dict = {"raw": raw}
+        if thread_id:
+            message_body["threadId"] = thread_id
         draft = service.users().drafts().create(
-            userId="me", body={"message": {"raw": raw}}
+            userId="me", body={"message": message_body}
         ).execute()
         return draft["id"]
+
+    def get_recently_sent(self, max_results: int = 20) -> list[dict]:
+        """Return recently sent messages as {id, thread_id, subject}."""
+        service = self.get_service()
+        result = service.users().messages().list(
+            userId="me", labelIds=["SENT"], maxResults=max_results
+        ).execute()
+        msgs = []
+        for msg in result.get("messages", []):
+            try:
+                txt = service.users().messages().get(
+                    userId="me", id=msg["id"], format="metadata",
+                    metadataHeaders=["Subject"],
+                ).execute()
+                subject = next(
+                    (h["value"] for h in txt["payload"]["headers"] if h["name"] == "Subject"), ""
+                )
+                sent_at = int(txt.get("internalDate", 0)) / 1000  # ms → seconds (Unix timestamp)
+                msgs.append({"id": msg["id"], "thread_id": txt.get("threadId", ""), "subject": subject, "sent_at": sent_at})
+            except Exception as e:
+                logger.warning("Failed to parse sent message %s: %s", msg.get("id"), e)
+        return msgs
 
     # ── Body extraction helpers ────────────────────────────────────────────────
 

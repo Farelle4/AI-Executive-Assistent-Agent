@@ -37,6 +37,9 @@ def run(orchestrator: AgentOrchestrator, once: bool = False, interval: int = 300
             logger.info("Starting pass...")
             count = orchestrator.run_batch()
             logger.info("Pass complete — processed %d emails.", count)
+            created = orchestrator.run_sent_batch()
+            if created:
+                logger.info("Sent batch: created %d calendar event(s).", created)
             if once:
                 break
             logger.info("Next run in %ds.", interval)
