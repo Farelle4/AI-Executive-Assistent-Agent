@@ -1,11 +1,14 @@
+import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateparser import parse as dateparse
 from dateparser.search import search_dates
 from zoneinfo import ZoneInfo
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from src.google_calendar import GoogleCalendar
+
+logger = logging.getLogger(__name__)
 
 # Words that break date+time grouping in dateparser (e.g. "lundi prochain 14:00")
 _RELATIVE = re.compile(r'\b(prochain|suivant|next|coming)\b', re.IGNORECASE)
@@ -92,7 +95,7 @@ class DraftResponse:
         norm_time = self._normalize_time(start_time)
         has_specific_time = bool(
             re.search(r"\d{1,2}:\d{2}", norm_time)
-            or re.search(r"\d{1,2}(am|pm)", norm_time, re.IGNORECASE)
+            or re.search(r"\d{1,2}\s*(am|pm)", norm_time, re.IGNORECASE)
         )
 
         # Step 1: combined
@@ -141,9 +144,10 @@ class DraftResponse:
         original_email = f"From: {sender}\nSubject: {subject}\n\n{body}".strip()
 
         structure_rule = (
+            f"IMPORTANT: Write the entire reply in {language} only — no other language.\n\n"
             f'1. Greeting using the sender\'s first name: "{first_name}"\n'
             f"2. The message body (1–3 sentences max, natural and direct)\n"
-            f"3. A closing line appropriate for {language}\n"
+            f"3. A closing line\n"
             f"4. Your first name on a new line: Farelle\n\n"
             f"Return only the email body — nothing else."
         )
@@ -160,38 +164,68 @@ Write a short reply confirming this works for you.
 
 {structure_rule}""", language=language)
 
-        # Date/time present but slot is busy: suggest alternatives
-        if raw_date and start_time:
+        # Date/time present, calendar checked, and slot is busy: suggest 3 alternatives
+        if raw_date and start_time and start_iso:
             try:
-                parsed_start = datetime.fromisoformat(start_iso).astimezone(self.TZ) if start_iso else datetime.now(self.TZ)
+                parsed_start = datetime.fromisoformat(start_iso).astimezone(self.TZ)
                 service = self._calendar.get_service()
-                slots = self._calendar.get_free_slots_for_day(
-                    service, target_date=parsed_start, duration_minutes=30
-                )
-                available_slots_text = self._format_daily_slots(
-                    [{"date": parsed_start.date().isoformat(), "slots": slots}]
-                )
-            except Exception:
+
+                proposals: list[tuple[str, str]] = []  # (date_str, slot_iso)
+                for offset in range(7):
+                    if len(proposals) >= 3:
+                        break
+                    check_date = parsed_start + timedelta(days=offset)
+                    day_slots = self._calendar.get_free_slots_for_day(
+                        service, target_date=check_date, duration_minutes=30
+                    )
+                    if not day_slots:
+                        continue
+                    # Take up to (3 - already collected) slots, evenly spread through the day
+                    n = min(3 - len(proposals), len(day_slots))
+                    if n >= len(day_slots):
+                        selected = day_slots
+                    elif n == 1:
+                        selected = [day_slots[len(day_slots) // 2]]
+                    else:
+                        step = (len(day_slots) - 1) / (n - 1)
+                        selected = [day_slots[round(i * step)] for i in range(n)]
+                    date_str = check_date.strftime("%A %d %B")
+                    proposals.extend((date_str, s) for s in selected)
+
+                if proposals:
+                    available_slots_text = "\n".join(
+                        f"- {date} at {datetime.fromisoformat(slot).astimezone(self.TZ).strftime('%H:%M')}"
+                        for date, slot in proposals[:3]
+                    )
+                else:
+                    available_slots_text = "No available slots were found."
+            except Exception as e:
+                logger.error("generate_draft_response: failed to fetch free slots: %s", e, exc_info=True)
                 available_slots_text = "No available slots were found."
             return self._call_llm(f"""You received this email:
 ---
 {original_email}
 ---
 
-{start_time} on {raw_date} doesn't work for you. You're free at these times instead:
+{start_time} on {raw_date} doesn't work for you. Here are 3 times you're free instead:
 {available_slots_text}
 
-Write a brief reply saying that time doesn't work and suggesting one of those alternatives.
+Write a brief reply saying that time doesn't work and proposing exactly these 3 alternatives.
 
 {structure_rule}""", language=language)
 
-        # No date or time: ask the sender when they're free
+        # No specific parseable date/time: ask for more details
+        vague_hint = (
+            f"They mentioned '{raw_date}' and/or '{start_time}' but no specific day or hour. "
+            "Ask them to suggest a precise date and time."
+            if (raw_date or start_time)
+            else "They haven't mentioned any date or time. Ask them when they're free."
+        )
         return self._call_llm(f"""You received this email:
 ---
 {original_email}
 ---
 
-They want to meet but haven't given a specific date and/or time.
-Write a short reply asking when they're free.
+{vague_hint}
 
 {structure_rule}""", language=language)

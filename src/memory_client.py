@@ -1,7 +1,6 @@
 import json
 import os
 import uuid
-from dotenv import load_dotenv
 from supabase import create_client
 
 _TABLE = "memory"
@@ -15,7 +14,6 @@ class MemoryClient:
     """
 
     def __init__(self):
-        load_dotenv()
         url = os.getenv("SUPABASE_URL")
         key = os.getenv("SUPABASE_KEY")
         if not url or not key:
@@ -24,14 +22,27 @@ class MemoryClient:
 
     # ── Email records (dedup + audit) ─────────────────────────────────────────
 
-    def save_email(self, message_id: str, subject: str, sender: str, intent: str, status: str) -> None:
-        """Insert a processed-email record."""
+    def save_email(self, message_id: str, subject: str, sender: str, status: str, language: str = "", intent: str = "") -> None:
+        """Insert a processed-email record. Refuses inserts with empty message_id."""
+        if not message_id:
+            raise ValueError("save_email: message_id must not be empty")
+        already = (
+            self.supabase.table(_TABLE)
+            .select("id")
+            .eq("record_type", "email")
+            .eq("message_id", message_id)
+            .limit(1)
+            .execute()
+        ).data
+        if already:
+            return
         self.supabase.table(_TABLE).insert({
             "id": str(uuid.uuid4()),
             "record_type": "email",
             "message_id": message_id,
             "subject": subject,
             "sender": sender,
+            "language": language,
             "intent": intent,
             "status": status,
         }).execute()
@@ -95,7 +106,7 @@ class MemoryClient:
             self.supabase.table(_TABLE)
             .select("name, is_vip, language, notes")
             .eq("record_type", "user")
-            .eq("email", email)
+            .eq("sender", email)
             .limit(1)
             .execute()
         )
@@ -114,7 +125,7 @@ class MemoryClient:
             self.supabase.table(_TABLE)
             .select("id")
             .eq("record_type", "user")
-            .eq("email", email)
+            .eq("sender", email)
             .limit(1)
             .execute()
         ).data
@@ -127,11 +138,11 @@ class MemoryClient:
         }
 
         if exists:
-            self.supabase.table(_TABLE).update(payload).eq("record_type", "user").eq("email", email).execute()
+            self.supabase.table(_TABLE).update(payload).eq("record_type", "user").eq("sender", email).execute()
         else:
             self.supabase.table(_TABLE).insert({
                 "id": str(uuid.uuid4()),
                 "record_type": "user",
-                "email": email,
+                "sender": email,
                 **payload,
             }).execute()

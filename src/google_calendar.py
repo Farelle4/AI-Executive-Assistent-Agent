@@ -4,7 +4,6 @@ from zoneinfo import ZoneInfo
 from googleapiclient.discovery import build
 from src.google_calendar_auth import GoogleAuthClient
 
-_auth = GoogleAuthClient()
 logger = logging.getLogger(__name__)
 
 
@@ -13,11 +12,14 @@ class GoogleCalendar:
 
     TZ = ZoneInfo("Europe/Berlin")
 
+    def __init__(self):
+        self._auth = GoogleAuthClient()
+
     def get_service(self):
         """Return an authenticated Google Calendar API service client."""
-        return build("calendar", "v3", credentials=_auth.get_creds())
+        return build("calendar", "v3", credentials=self._auth.get_creds())
 
-    def create_event(self, title: str, start_iso: str, end_iso: str = None, duration_minutes: int = 30) -> dict:
+    def create_event(self, title: str, start_iso: str, end_iso: str | None = None, duration_minutes: int = 30) -> dict:
         """Create a calendar event. If end_iso is omitted, defaults to start + duration_minutes."""
         service = self.get_service()
         start = datetime.fromisoformat(start_iso)
@@ -44,11 +46,14 @@ class GoogleCalendar:
         ).execute()
         return events.get("items", [])
 
-    def is_time_free(self, start_iso: str, duration_minutes: int = 30) -> bool:
-        """Return True if the calendar has no events overlapping [start, start + duration_minutes)."""
+    def is_time_free(self, start_iso: str, end_iso: str = "", duration_minutes: int = 30) -> bool:
+        """Return True if the calendar has no events overlapping [start, end).
+
+        end_iso takes precedence over duration_minutes when provided.
+        """
         service = self.get_service()
         start = datetime.fromisoformat(start_iso).astimezone(timezone.utc)
-        end = start + timedelta(minutes=duration_minutes)
+        end = datetime.fromisoformat(end_iso).astimezone(timezone.utc) if end_iso else start + timedelta(minutes=duration_minutes)
 
         body = {
             "timeMin": start.isoformat().replace("+00:00", "Z"),

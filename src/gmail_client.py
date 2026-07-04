@@ -116,7 +116,7 @@ class GmailClient:
                     metadataHeaders=["Subject"],
                 ).execute()
                 subject = next(
-                    (h["value"] for h in txt["payload"]["headers"] if h["name"] == "Subject"), ""
+                    (h["value"] for h in txt.get("payload", {}).get("headers", []) if h["name"] == "Subject"), ""
                 )
                 sent_at = int(txt.get("internalDate", 0)) / 1000  # ms → seconds (Unix timestamp)
                 msgs.append({"id": msg["id"], "thread_id": txt.get("threadId", ""), "subject": subject, "sent_at": sent_at})

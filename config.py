@@ -1,5 +1,8 @@
 import warnings
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Suppress a LangGraph internal deprecation warning about JsonPlusSerializer defaults
 warnings.filterwarnings("ignore", message="The default value of `allowed_objects`")

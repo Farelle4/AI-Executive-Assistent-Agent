@@ -3,10 +3,7 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 
-from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
-
-load_dotenv()
 from langchain_core.tools import tool
 from langchain.agents import create_agent
 
@@ -23,47 +20,48 @@ _SYSTEM_PROMPT = """You are an email processing agent for Farelle Tchoukwe.
 
 When you receive an email as JSON, process it by following these steps in order:
 
+IMPORTANT: email_id always refers to the "id" field of the email JSON — never the "message_id" field.
+
 STEP 1 — Dedup: call check_if_processed(email_id).
   → If True: stop immediately, do nothing else.
-  → If False: continue.
+  → If False: call mark_as_read(email_id) immediately to prevent re-processing, then continue.
 
 STEP 2 — User context: call get_user_context(sender).
-  → Note is_vip, preferred name, preferred language, and notes.
+  → Note is_vip, preferred name, and notes.
 
 STEP 3 — Classify: call classify_email(subject, sender, body).
   → Note the intent, raw_date, start_raw_time, end_raw_time, and language.
-  → If user_context has a preferred language, use it instead of the detected language.
+  → Always use the language detected from the email body. Never override it.
 
 STEP 4 — Route:
   → If intent is NOT one of [meeting_request, meeting_confirmation, meeting_cancellation]:
       - If is_vip is True: continue to step 5 anyway (VIP always get a reply).
-      - Otherwise: call mark_as_read(email_id), call save_to_memory(email_id, subject, sender, intent, "IGNORED"), STOP.
+      - Otherwise: call save_to_memory(email_id, subject, sender, language, intent, "IGNORED"), STOP.
   → Otherwise continue to step 5.
 
 STEP 5 — Check calendar (only if intent != "meeting_cancellation" AND raw_date and start_raw_time are not empty):
   → call check_calendar(subject, raw_date, start_raw_time, end_raw_time)
   → Note is_free, start_iso, end_iso.
 
-STEP 6 — Draft: call generate_draft(sender, subject, body, intent, raw_date, start_raw_time, end_raw_time, language, event_created=<is_free from step 5>).
+STEP 6 — Draft: call generate_draft(sender, subject, body, intent, raw_date, start_raw_time, end_raw_time, language, event_created=<is_free from step 5>, start_iso=<start_iso from step 5>).
   → Use the preferred name from user_context in the greeting if available.
+  → If start_iso is empty (date/time was too vague to parse), pass raw_date="" and start_raw_time="" so the agent asks for a more specific date and time.
 
 STEP 7 — Save draft: call save_draft(to=sender, subject=subject, draft_body=<text from step 6>, thread_id=<thread_id from the email>, message_id=<message_id from the email>, start_iso=<start_iso from step 5 if is_free was True, else "">, end_iso=<end_iso from step 5 if is_free was True, else "">).
   → Always pass thread_id and message_id. Pass start_iso and end_iso only when confirming a meeting (is_free=True).
 
 STEP 8 — Update user memory: ALWAYS call save_user_memory for the sender, even if user_context was already known.
-  Use the name extracted from the sender header, the language detected in step 3, the is_vip flag from user_context (default False), and any relevant notes.
+  Use the name extracted from the sender header, the is_vip flag from user_context (default False), and any relevant notes.
   This ensures every contact has an up-to-date profile in memory.
 
-STEP 9 — Mark read: call mark_as_read(email_id).
-
-STEP 10 — Persist: call save_to_memory(email_id, subject, sender, intent, "DRAFTED").
+STEP 9 — Persist: call save_to_memory(email_id, subject, sender, language, intent, "DRAFTED").
 
 Always complete every step. Never skip save_to_memory at the end.
 """
 
 
 class AgentOrchestrator:
-    """Email processing agent built with LangGraph create_react_agent.
+    """Email processing agent built with create_agent.
 
     The LLM decides which tools to call and in what order at runtime,
     guided by the system prompt above.
@@ -116,7 +114,7 @@ class AgentOrchestrator:
                 logger.warning("check_calendar: could not parse date/time — raw_date=%r start_raw_time=%r", raw_date, start_raw_time)
                 return {"is_free": False, "start_iso": "", "end_iso": ""}
             end_iso = _responder._build_start_iso(raw_date, end_raw_time) if end_raw_time else ""
-            is_free = _calendar.is_time_free(start_iso)
+            is_free = _calendar.is_time_free(start_iso, end_iso=end_iso)
             logger.info("check_calendar: start_iso=%s is_free=%s", start_iso, is_free)
             return {"is_free": is_free, "start_iso": start_iso, "end_iso": end_iso}
 
@@ -131,6 +129,7 @@ class AgentOrchestrator:
             end_raw_time: str = "",
             language: str = "English",
             event_created: bool = False,
+            start_iso: str = "",
         ) -> str:
             """Generate a draft email reply. Returns the email body as plain text."""
             analysis = {
@@ -140,6 +139,7 @@ class AgentOrchestrator:
                 "end_raw_time": end_raw_time,
                 "language": language,
                 "event_created": event_created,
+                "start_iso": start_iso,
             }
             return _responder.generate_draft_response(
                 sender=sender, subject=subject, analysis=analysis, body=body,
@@ -190,10 +190,16 @@ class AgentOrchestrator:
 
         @tool
         def save_to_memory(
-            email_id: str, subject: str, sender: str, intent: str, status: str
+            email_id: str, subject: str, sender: str, language: str, intent: str, status: str
         ) -> str:
-            """Persist the processing result to Supabase. status: DRAFTED, IGNORED, or ERROR."""
-            _memory.save_email(email_id, subject, sender, intent, status)
+            """Persist the processing result to Supabase. status: DRAFTED, IGNORED, or ERROR.
+
+            email_id must be the 'id' field from the email JSON (not 'message_id').
+            """
+            if not email_id:
+                logger.warning("save_to_memory called with empty email_id — skipping")
+                return "skipped: empty email_id"
+            _memory.save_email(email_id, subject, sender, status, language=language, intent=intent)
             return f"saved with status={status}"
 
         @tool
@@ -261,14 +267,20 @@ class AgentOrchestrator:
         calendar event if a match is found.
         Returns the number of events created.
         """
-        sent = self._gmail.get_recently_sent(max_results=20)
+        sent = self._gmail.get_recently_sent(max_results=50)
         logger.info("run_sent_batch: scanning %d sent messages", len(sent))
-        created = 0
+
+        # Deduplicate by thread_id — keep the most recent message per thread
+        seen_threads: dict[str, dict] = {}
         for msg in sent:
-            thread_id = msg.get("thread_id", "")
+            tid = msg.get("thread_id", "")
+            if tid and tid not in seen_threads:
+                seen_threads[tid] = msg
+        logger.debug("run_sent_batch: %d unique threads to check", len(seen_threads))
+
+        created = 0
+        for thread_id, msg in seen_threads.items():
             logger.debug("run_sent_batch: checking thread_id=%s subject=%r", thread_id, msg.get("subject"))
-            if not thread_id:
-                continue
             pending = self._memory.get_pending_event(thread_id)
             if not pending:
                 logger.debug("run_sent_batch: no pending event for thread_id=%s", thread_id)

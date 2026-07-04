@@ -11,7 +11,7 @@ class EmailClassification(BaseModel):
     raw_date: str = Field(default="", description="Date as written in the email, e.g. 'next Monday', '14 juin'")
     start_raw_time: str = Field(default="", description="Start time as written, e.g. '2pm', '14:00'")
     end_raw_time: str = Field(default="", description="End time as written, e.g. '3pm', '15:00'")
-    language: str = Field(default="English", description="Language of the email body, e.g. 'English', 'French'")
+    language: str = Field(default="English", description="Language of the email body, e.g. 'English', 'German'")
 
 
 _PROMPT = ChatPromptTemplate.from_messages([
@@ -25,7 +25,7 @@ Body: {body}
 Rules:
 - Do NOT filter based on no-reply senders — meeting confirmations from Doctolib, Calendly, or Google Calendar often come from automated addresses.
 - Copy date and time expressions exactly as written — do not calculate, convert, or interpret them.
-- Detect the language from the email body (full name in English, e.g. "French", "German").
+- Detect the language ONLY from the Body field — ignore the Subject line entirely for language detection. Return the full language name in English (e.g. "French", "German", "English").
 - If no date or time is mentioned, return empty strings for raw_date and start_raw_time."""),
 ])
 
