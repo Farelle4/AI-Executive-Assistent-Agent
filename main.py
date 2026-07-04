@@ -32,20 +32,23 @@ def _parse_args():
 
 def run(orchestrator: AgentOrchestrator, once: bool = False, interval: int = 300) -> None:
     """Polling loop — separated from arg parsing for testability."""
-    try:
-        while True:
+    while True:
+        try:
             logger.info("Starting pass...")
             count = orchestrator.run_batch()
             logger.info("Pass complete — processed %d emails.", count)
             created = orchestrator.run_sent_batch()
             if created:
                 logger.info("Sent batch: created %d calendar event(s).", created)
-            if once:
-                break
-            logger.info("Next run in %ds.", interval)
-            time.sleep(interval)
-    except KeyboardInterrupt:
-        logger.info("Interrupted — shutting down cleanly.")
+        except KeyboardInterrupt:
+            logger.info("Interrupted — shutting down cleanly.")
+            return
+        except Exception as e:
+            logger.error("Pass failed with unexpected error: %s", e, exc_info=True)
+        if once:
+            break
+        logger.info("Next run in %ds.", interval)
+        time.sleep(interval)
 
 
 def main():

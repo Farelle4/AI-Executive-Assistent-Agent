@@ -281,6 +281,46 @@ python main.py --interval 120
 python main.py --debug --once
 ```
 
+### Running automatically on Windows (auto-start on login)
+
+The recommended approach on Windows is to use the **Startup folder** — the agent starts silently in the background every time you log in, with no terminal window.
+
+Two files handle this (already included in the repo):
+
+**`run_agent_background.vbs`** — launches Python with no visible window:
+```vbs
+Set WshShell = CreateObject("WScript.Shell")
+WshShell.Run "cmd.exe /c ""C:\Python314\python.exe D:\Projekte\Agentic_AI_project\main.py >> D:\Projekte\Agentic_AI_project\agent.log 2>&1""", 0, False
+```
+
+**Install** — create a shortcut to the VBS in your Startup folder (run once in PowerShell):
+```powershell
+$startupFolder = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+$WshShell = New-Object -ComObject WScript.Shell
+$shortcut = $WshShell.CreateShortcut("$startupFolder\AI Email Agent.lnk")
+$shortcut.TargetPath = "wscript.exe"
+$shortcut.Arguments = "`"D:\Projekte\Agentic_AI_project\run_agent_background.vbs`""
+$shortcut.WorkingDirectory = "D:\Projekte\Agentic_AI_project"
+$shortcut.Save()
+```
+
+**Start immediately** (without rebooting):
+```powershell
+Start-Process "wscript.exe" -ArgumentList "`"D:\Projekte\Agentic_AI_project\run_agent_background.vbs`"" -WindowStyle Hidden
+```
+
+**Monitor logs** in real time:
+```powershell
+Get-Content D:\Projekte\Agentic_AI_project\agent.log -Tail 30 -Wait
+```
+
+**Stop the agent**:
+```powershell
+Get-Process python | Stop-Process -Force
+```
+
+> **Note:** the agent only runs while Windows is on and you are logged in. For 24/7 operation without your computer, deploy to a cloud worker (Railway, Render, Fly.io).
+
 ---
 
 ## Key Technical Decisions
