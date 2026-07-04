@@ -19,14 +19,14 @@ def memory():
 
 def test_is_processed_returns_true_when_found(memory):
     memory.supabase.table.return_value.select.return_value \
-        .eq.return_value.eq.return_value.limit.return_value \
+        .in_.return_value.eq.return_value.limit.return_value \
         .execute.return_value.data = [{"id": "abc"}]
     assert memory.is_processed("msg-123") is True
 
 
 def test_is_processed_returns_false_when_not_found(memory):
     memory.supabase.table.return_value.select.return_value \
-        .eq.return_value.eq.return_value.limit.return_value \
+        .in_.return_value.eq.return_value.limit.return_value \
         .execute.return_value.data = []
     assert memory.is_processed("msg-unknown") is False
 
@@ -34,9 +34,9 @@ def test_is_processed_returns_false_when_not_found(memory):
 # ── save_email ─────────────────────────────────────────────────────────────────
 
 def test_save_email_inserts_correct_record_type(memory):
-    # Simulate dedup check finding no existing record
+    # Simulate dedup check finding no existing record (.in_ is used, not .eq, for record_type)
     memory.supabase.table.return_value.select.return_value \
-        .eq.return_value.eq.return_value.limit.return_value \
+        .in_.return_value.eq.return_value.limit.return_value \
         .execute.return_value.data = []
     memory.save_email("mid", "Subject", "sender@x.com", "DRAFTED", language="Italian", intent="meeting_request")
     insert_call = memory.supabase.table.return_value.insert
@@ -93,6 +93,9 @@ def test_upsert_user_updates_when_contact_exists(memory):
 # ── save_pending_event ────────────────────────────────────────────────────────
 
 def test_save_pending_event_stores_isos_as_json(memory):
+    # UPDATE returns no rows → fallback INSERT is triggered
+    memory.supabase.table.return_value.update.return_value \
+        .eq.return_value.eq.return_value.execute.return_value.data = []
     memory.save_pending_event("thread-1", "Meeting", "2026-07-10T10:00:00+02:00", "2026-07-10T10:30:00+02:00")
     payload = memory.supabase.table.return_value.insert.call_args[0][0]
     assert payload["record_type"] == "pending_event"

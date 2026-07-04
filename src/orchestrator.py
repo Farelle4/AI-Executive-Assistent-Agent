@@ -20,9 +20,9 @@ _SYSTEM_PROMPT = """You are an email processing agent for Farelle Tchoukwe.
 
 When you receive an email as JSON, process it by following these steps in order:
 
-IMPORTANT: email_id always refers to the "id" field of the email JSON — never the "message_id" field.
+IMPORTANT: thread_id = "thread_id" field of the email JSON. email_id = "id" field (used only for mark_as_read).
 
-STEP 1 — Dedup: call check_if_processed(email_id).
+STEP 1 — Dedup: call check_if_processed(thread_id).
   → If True: stop immediately, do nothing else.
   → If False: call mark_as_read(email_id) immediately to prevent re-processing, then continue.
 
@@ -36,7 +36,7 @@ STEP 3 — Classify: call classify_email(subject, sender, body).
 STEP 4 — Route:
   → If intent is NOT one of [meeting_request, meeting_confirmation, meeting_cancellation]:
       - If is_vip is True: continue to step 5 anyway (VIP always get a reply).
-      - Otherwise: call save_to_memory(email_id, subject, sender, language, intent, "IGNORED"), STOP.
+      - Otherwise: call save_to_memory(thread_id, subject, sender, language, intent, "IGNORED"), STOP.
   → Otherwise continue to step 5.
 
 STEP 5 — Check calendar (only if intent != "meeting_cancellation" AND raw_date and start_raw_time are not empty):
@@ -47,14 +47,14 @@ STEP 6 — Draft: call generate_draft(sender, subject, body, intent, raw_date, s
   → Use the preferred name from user_context in the greeting if available.
   → If start_iso is empty (date/time was too vague to parse), pass raw_date="" and start_raw_time="" so the agent asks for a more specific date and time.
 
-STEP 7 — Save draft: call save_draft(to=sender, subject=subject, draft_body=<text from step 6>, thread_id=<thread_id from the email>, message_id=<message_id from the email>, start_iso=<start_iso from step 5 if is_free was True, else "">, end_iso=<end_iso from step 5 if is_free was True, else "">).
+STEP 7 — Persist: call save_to_memory(thread_id, subject, sender, language, intent, "DRAFTED").
+  → Must happen BEFORE save_draft so the row exists when the pending event is saved.
+
+STEP 8 — Save draft: call save_draft(to=sender, subject=subject, draft_body=<text from step 6>, thread_id=<thread_id from the email>, message_id=<message_id from the email>, start_iso=<start_iso from step 5 if is_free was True, else "">, end_iso=<end_iso from step 5 if is_free was True, else "">).
   → Always pass thread_id and message_id. Pass start_iso and end_iso only when confirming a meeting (is_free=True).
 
-STEP 8 — Update user memory: ALWAYS call save_user_memory for the sender, even if user_context was already known.
+STEP 9 — Update user memory: ALWAYS call save_user_memory for the sender, even if user_context was already known.
   Use the name extracted from the sender header, the is_vip flag from user_context (default False), and any relevant notes.
-  This ensures every contact has an up-to-date profile in memory.
-
-STEP 9 — Persist: call save_to_memory(email_id, subject, sender, language, intent, "DRAFTED").
 
 Always complete every step. Never skip save_to_memory at the end.
 """
@@ -88,9 +88,9 @@ class AgentOrchestrator:
         # Each tool is a closure over the service singletons above.
 
         @tool
-        def check_if_processed(email_id: str) -> bool:
-            """Return True if this email was already processed (Supabase dedup)."""
-            return _memory.is_processed(email_id)
+        def check_if_processed(thread_id: str) -> bool:
+            """Return True if this thread was already processed (Supabase dedup)."""
+            return _memory.is_processed(thread_id)
 
         @tool
         def classify_email(subject: str, sender: str, body: str) -> dict:
@@ -190,16 +190,16 @@ class AgentOrchestrator:
 
         @tool
         def save_to_memory(
-            email_id: str, subject: str, sender: str, language: str, intent: str, status: str
+            thread_id: str, subject: str, sender: str, language: str, intent: str, status: str
         ) -> str:
             """Persist the processing result to Supabase. status: DRAFTED, IGNORED, or ERROR.
 
-            email_id must be the 'id' field from the email JSON (not 'message_id').
+            thread_id must be the 'thread_id' field from the email JSON.
             """
-            if not email_id:
-                logger.warning("save_to_memory called with empty email_id — skipping")
-                return "skipped: empty email_id"
-            _memory.save_email(email_id, subject, sender, status, language=language, intent=intent)
+            if not thread_id:
+                logger.warning("save_to_memory called with empty thread_id — skipping")
+                return "skipped: empty thread_id"
+            _memory.save_email(thread_id, subject, sender, status, language=language, intent=intent)
             return f"saved with status={status}"
 
         @tool

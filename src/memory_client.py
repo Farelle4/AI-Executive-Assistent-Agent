@@ -9,8 +9,9 @@ _TABLE = "memory"
 class MemoryClient:
     """Supabase-backed store using a single 'memory' table.
 
-    record_type='email' — one row per processed email (dedup + audit)
-    record_type='user'  — one row per contact (preferences, VIP status)
+    record_type='email'         — one row per thread (dedup + audit)
+    record_type='pending_event' — same row promoted when a meeting slot is confirmed
+    record_type='user'          — one row per contact (preferences, VIP status)
     """
 
     def __init__(self):
@@ -22,15 +23,15 @@ class MemoryClient:
 
     # ── Email records (dedup + audit) ─────────────────────────────────────────
 
-    def save_email(self, message_id: str, subject: str, sender: str, status: str, language: str = "", intent: str = "") -> None:
-        """Insert a processed-email record. Refuses inserts with empty message_id."""
-        if not message_id:
-            raise ValueError("save_email: message_id must not be empty")
+    def save_email(self, thread_id: str, subject: str, sender: str, status: str, language: str = "", intent: str = "") -> None:
+        """Insert one email record per thread. Raises if thread_id is empty. Skips if already exists."""
+        if not thread_id:
+            raise ValueError("save_email: thread_id must not be empty")
         already = (
             self.supabase.table(_TABLE)
             .select("id")
-            .eq("record_type", "email")
-            .eq("message_id", message_id)
+            .in_("record_type", ["email", "pending_event"])
+            .eq("message_id", thread_id)
             .limit(1)
             .execute()
         ).data
@@ -39,7 +40,7 @@ class MemoryClient:
         self.supabase.table(_TABLE).insert({
             "id": str(uuid.uuid4()),
             "record_type": "email",
-            "message_id": message_id,
+            "message_id": thread_id,
             "subject": subject,
             "sender": sender,
             "language": language,
@@ -47,13 +48,13 @@ class MemoryClient:
             "status": status,
         }).execute()
 
-    def is_processed(self, message_id: str) -> bool:
-        """Return True if this email has already been processed."""
+    def is_processed(self, thread_id: str) -> bool:
+        """Return True if this thread has already been processed (email or pending_event)."""
         res = (
             self.supabase.table(_TABLE)
             .select("id")
-            .eq("record_type", "email")
-            .eq("message_id", message_id)
+            .in_("record_type", ["email", "pending_event"])
+            .eq("message_id", thread_id)
             .limit(1)
             .execute()
         )
@@ -66,15 +67,26 @@ class MemoryClient:
     # ── Pending calendar events ────────────────────────────────────────────────
 
     def save_pending_event(self, thread_id: str, subject: str, start_iso: str, end_iso: str = "") -> None:
-        """Store meeting details to create after the human sends the confirmation email."""
-        self.supabase.table(_TABLE).insert({
-            "id": str(uuid.uuid4()),
+        """Promote the existing email row to pending_event, storing meeting ISO times in notes.
+
+        If no email row exists yet for this thread, inserts a new pending_event row directly.
+        """
+        notes = json.dumps({"start_iso": start_iso, "end_iso": end_iso})
+        updated = self.supabase.table(_TABLE).update({
             "record_type": "pending_event",
-            "message_id": thread_id,
-            "subject": subject,
-            "notes": json.dumps({"start_iso": start_iso, "end_iso": end_iso}),
+            "notes": notes,
             "status": "pending",
-        }).execute()
+        }).eq("record_type", "email").eq("message_id", thread_id).execute()
+
+        if not updated.data:
+            self.supabase.table(_TABLE).insert({
+                "id": str(uuid.uuid4()),
+                "record_type": "pending_event",
+                "message_id": thread_id,
+                "subject": subject,
+                "notes": notes,
+                "status": "pending",
+            }).execute()
 
     def get_pending_event(self, thread_id: str) -> dict | None:
         """Return a pending event for this thread, or None if not found."""
@@ -98,10 +110,7 @@ class MemoryClient:
     # ── User records (preferences + VIP) ──────────────────────────────────────
 
     def get_user(self, email: str) -> dict:
-        """Return stored preferences for a contact, or {} if unknown.
-
-        Returns keys: name, is_vip, language, notes.
-        """
+        """Return stored preferences for a contact, or {} if unknown."""
         res = (
             self.supabase.table(_TABLE)
             .select("name, is_vip, language, notes")
@@ -130,12 +139,7 @@ class MemoryClient:
             .execute()
         ).data
 
-        payload = {
-            "name": name,
-            "is_vip": is_vip,
-            "language": language,
-            "notes": notes,
-        }
+        payload = {"name": name, "is_vip": is_vip, "language": language, "notes": notes}
 
         if exists:
             self.supabase.table(_TABLE).update(payload).eq("record_type", "user").eq("sender", email).execute()

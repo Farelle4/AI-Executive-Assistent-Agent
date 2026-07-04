@@ -30,6 +30,38 @@ mcp>=1.27.0
 # =========================
 supabase>=2.0.0
 
+# Supabase table: memory
+# ─────────────────────────────────────────────────────────────────────────────
+# One table, three record types (discriminated by record_type):
+#   'email'         — one row per thread (dedup + audit)
+#   'pending_event' — same row promoted from 'email' once a meeting slot is confirmed
+#   'user'          — one row per contact (preferences, VIP status)
+#
+# SQL to create the table:
+#
+#   CREATE TABLE memory (
+#     id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+#     record_type text        NOT NULL,          -- 'email' | 'pending_event' | 'user'
+#     message_id  text,                          -- Gmail thread_id  (email / pending_event rows)
+#     subject     text,                          -- email subject    (email / pending_event rows)
+#     sender      text,                          -- sender address   (email / pending_event rows)
+#                                                -- contact address  (user rows)
+#     language    text,                          -- detected body language (email rows)
+#     intent      text,                          -- classifier intent      (email rows)
+#     status      text,                          -- DRAFTED | IGNORED | ERROR | pending | done
+#     notes       text,                          -- JSON {start_iso, end_iso} (pending_event rows)
+#                                                -- free-text notes          (user rows)
+#     name        text,                          -- display name   (user rows)
+#     is_vip      boolean     DEFAULT false,     -- VIP flag       (user rows)
+#     created_at  timestamptz DEFAULT now()
+#   );
+#
+#   -- Prevent duplicate threads (only one email/pending_event row per thread_id)
+#   CREATE UNIQUE INDEX memory_message_id_unique
+#     ON memory (message_id)
+#     WHERE record_type IN ('email', 'pending_event');
+# ─────────────────────────────────────────────────────────────────────────────
+
 # =========================
 # Testing
 # =========================
