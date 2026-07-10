@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 _RELATIVE = re.compile(r'\b(prochain|suivant|next|coming)\b', re.IGNORECASE)
 # French "Xh" / "XhYY" time format (e.g. "14h", "10h30")
 _FRENCH_H = re.compile(r'^(\d{1,2})h(\d{0,2})$', re.IGNORECASE)
+# German "X Uhr" / "XUhr" / "X Uhr YY" time format (e.g. "13Uhr", "13 Uhr", "13 Uhr 30")
+_GERMAN_UHR = re.compile(r'^(?:um\s+)?(\d{1,2})\s*uhr\s*(\d{0,2})$', re.IGNORECASE)
 
 
 _DRAFT_PROMPT = ChatPromptTemplate.from_messages([
@@ -62,8 +64,12 @@ class DraftResponse:
         return "\n".join(lines)
 
     def _normalize_time(self, t: str) -> str:
-        """Convert French 'Xh' / 'XhYY' format to 'HH:MM' so dateparser understands it."""
-        m = _FRENCH_H.match(t.strip())
+        """Convert French 'Xh'/'XhYY' or German 'X Uhr'/'XUhr' formats to 'HH:MM' so dateparser understands it."""
+        stripped = t.strip()
+        m = _FRENCH_H.match(stripped)
+        if m:
+            return f"{m.group(1)}:{m.group(2) or '00'}"
+        m = _GERMAN_UHR.match(stripped)
         if m:
             return f"{m.group(1)}:{m.group(2) or '00'}"
         return t
