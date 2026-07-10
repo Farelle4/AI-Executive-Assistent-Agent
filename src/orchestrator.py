@@ -250,6 +250,20 @@ class AgentOrchestrator:
             })
         except Exception as e:
             logger.error("Agent failed for email %s: %s", email.get("id"), e)
+        finally:
+            # Safety net: the LLM is instructed to call mark_as_read as its first
+            # tool call, but tool-calling order/completeness isn't enforced — it can
+            # skip straight to save_to_memory. If the thread ended up recorded as
+            # processed, the email must not be left UNREAD, so enforce it here
+            # regardless of whether the LLM actually called mark_as_read itself. A
+            # genuine failure before save_to_memory leaves is_processed False, so
+            # the email stays unread and gets retried on the next pass.
+            thread_id = email.get("thread_id", "")
+            if thread_id and self._memory.is_processed(thread_id):
+                try:
+                    self._gmail.mark_as_read(email["id"])
+                except Exception as e:
+                    logger.error("Failed to mark email %s as read: %s", email.get("id"), e)
 
     def run_batch(self) -> int:
         """Fetch all unread emails and process each one. Returns number fetched."""
