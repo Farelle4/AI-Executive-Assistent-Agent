@@ -145,6 +145,7 @@ agentic-ai-project/
 │   └── test_main.py               ← CLI args, polling loop, KeyboardInterrupt
 │
 ├── credentials.json               ← Google OAuth client secrets (not committed)
+├── token.json                     ← refresh tokens (not committed)
 └── .env                           ← API keys and config (not committed)
 ```
 
@@ -212,8 +213,8 @@ Create a `.env` file at the project root:
 
 ```env
 # LLM
-OPENAI_API_KEY=sk-...
-LLM_MODEL=openai:gpt-4o-mini              
+API_KEY=...
+LLM_MODEL=...            
 
 # Supabase
 SUPABASE_URL=https://xxxx.supabase.co
