@@ -20,43 +20,38 @@ _SYSTEM_PROMPT = """You are an email processing agent for Farelle Tchoukwe.
 
 When you receive an email as JSON, process it by following these steps in order:
 
-IMPORTANT: thread_id = "thread_id" field of the email JSON. email_id = "id" field (used only for mark_as_read).
+IMPORTANT: thread_id = "thread_id" field of the email JSON. message_id = "message_id" field.
+email_id = "id" field (used only for mark_as_read).
 
-STEP 1 — Dedup: call check_if_processed(thread_id).
-  → If True: stop immediately, do nothing else.
-  → If False: call mark_as_read(email_id) immediately to prevent re-processing, then continue.
+STEP 1 — Dedup + mark read: call check_processed_and_mark_read(thread_id, email_id).
+  → If True (already processed): stop immediately, do nothing else.
+  → If False: the email was just marked as read to prevent re-processing — continue.
 
-STEP 2 — User context: call get_user_context(sender).
-  → Note is_vip, preferred name, and notes.
-
-STEP 3 — Classify: call classify_email(subject, sender, body).
+STEP 2 — User context + classify: call get_context_and_classify(sender, subject, body).
+  → Note is_vip, preferred name, and notes from user_context.
   → Note the intent, raw_date, start_raw_time, end_raw_time, and language.
   → Always use the language detected from the email body. Never override it.
 
-STEP 4 — Route:
+STEP 3 — Route:
   → If intent is NOT one of [meeting_request, meeting_confirmation, meeting_cancellation]:
-      - If is_vip is True: continue to step 5 anyway (VIP always get a reply).
+      - If is_vip is True: continue to step 4 anyway (VIP always get a reply).
       - Otherwise: call save_to_memory(thread_id, subject, sender, language, intent, "IGNORED"), STOP.
-  → Otherwise continue to step 5.
+  → Otherwise continue to step 4.
 
-STEP 5 — Check calendar (only if intent != "meeting_cancellation" AND raw_date and start_raw_time are not empty):
-  → call check_calendar(subject, raw_date, start_raw_time, end_raw_time)
-  → Note is_free, start_iso, end_iso.
-
-STEP 6 — Draft: call generate_draft(sender, subject, body, intent, raw_date, start_raw_time, end_raw_time, language, event_created=<is_free from step 5>, start_iso=<start_iso from step 5>).
+STEP 4 — Check calendar + draft: call check_calendar_and_generate_draft(sender, subject, body, intent, raw_date, start_raw_time, end_raw_time, language).
+  → Internally checks calendar availability (only if intent != "meeting_cancellation" AND raw_date
+    and start_raw_time are not empty) before generating the draft.
+  → Note is_free, start_iso, end_iso, and draft_body.
   → Use the preferred name from user_context in the greeting if available.
-  → If start_iso is empty (date/time was too vague to parse), pass raw_date="" and start_raw_time="" so the agent asks for a more specific date and time.
 
-STEP 7 — Persist: call save_to_memory(thread_id, subject, sender, language, intent, "DRAFTED").
-  → Must happen BEFORE save_draft so the row exists when the pending event is saved.
+STEP 5 — Persist: call save_to_memory(thread_id, subject, sender, language, intent, "DRAFTED").
+  → Must happen BEFORE step 6 so the row exists when the pending event is saved.
 
-STEP 8 — Save draft: call save_draft(to=sender, subject=subject, draft_body=<text from step 6>, thread_id=<thread_id from the email>, message_id=<message_id from the email>, start_iso=<start_iso from step 5 if is_free was True, else "">, end_iso=<end_iso from step 5 if is_free was True, else "">).
+STEP 6 — Save draft + update user memory: call save_draft_and_update_contact(to=sender, subject=subject, draft_body=<draft_body from step 4>, thread_id=<thread_id from the email>, message_id=<message_id from the email>, start_iso=<start_iso from step 4 if is_free was True, else "">, end_iso=<end_iso from step 4 if is_free was True, else "">, name=<name extracted from the sender header>, is_vip=<is_vip from step 2, default False>, language=language, notes=<any relevant notes>).
   → Always pass thread_id and message_id. Pass start_iso and end_iso only when confirming a meeting (is_free=True).
+  → This always updates the contact's stored preferences too, even if user_context was already known.
 
-STEP 9 — Update user memory: ALWAYS call save_user_memory for the sender, even if user_context was already known.
-  Use the name extracted from the sender header, the is_vip flag from user_context (default False), and any relevant notes.
-
-Always complete every step. Never skip save_to_memory at the end.
+Always complete every step. Never skip save_to_memory before stopping or before step 6.
 """
 
 
@@ -88,38 +83,34 @@ class AgentOrchestrator:
         # Each tool is a closure over the service singletons above.
 
         @tool
-        def check_if_processed(thread_id: str) -> bool:
-            """Return True if this thread was already processed (Supabase dedup)."""
-            return _memory.is_processed(thread_id)
+        def check_processed_and_mark_read(thread_id: str, email_id: str) -> bool:
+            """Dedup-check the thread, then mark the email as read if it's new.
 
-        @tool
-        def classify_email(subject: str, sender: str, body: str) -> dict:
-            """Classify the email intent and extract date, time, and language."""
-            return _classifier.analyze_email(subject, sender, body)
-
-        @tool
-        def check_calendar(
-            subject: str,
-            raw_date: str,
-            start_raw_time: str,
-            end_raw_time: str = "",
-        ) -> dict:
-            """Check calendar availability for a requested time slot.
-
-            Returns {"is_free": bool, "start_iso": str, "end_iso": str}.
-            Does NOT create any event.
+            Combines check_if_processed + mark_as_read, in that order.
+            Returns True if this thread was already processed (Supabase dedup) — in that
+            case mark_as_read was NOT called and the pipeline must stop.
             """
-            start_iso = _responder._build_start_iso(raw_date, start_raw_time)
-            if not start_iso:
-                logger.warning("check_calendar: could not parse date/time — raw_date=%r start_raw_time=%r", raw_date, start_raw_time)
-                return {"is_free": False, "start_iso": "", "end_iso": ""}
-            end_iso = _responder._build_start_iso(raw_date, end_raw_time) if end_raw_time else ""
-            is_free = _calendar.is_time_free(start_iso, end_iso=end_iso)
-            logger.info("check_calendar: start_iso=%s is_free=%s", start_iso, is_free)
-            return {"is_free": is_free, "start_iso": start_iso, "end_iso": end_iso}
+            if _memory.is_processed(thread_id):
+                return True
+            self._gmail.mark_as_read(email_id)
+            return False
 
         @tool
-        def generate_draft(
+        def get_context_and_classify(sender: str, subject: str, body: str) -> dict:
+            """Fetch stored contact context, then classify the email intent/date/time/language.
+
+            Combines get_user_context + classify_email, in that order.
+
+            Returns {"user_context": {"name": str, "is_vip": bool, "language": str, "notes": str}
+            (or {} if unknown), plus intent, confidence, raw_date, start_raw_time, end_raw_time,
+            language from the classification}.
+            """
+            user_context = _memory.get_user(sender)
+            classification = _classifier.analyze_email(subject, sender, body)
+            return {"user_context": user_context, **classification}
+
+        @tool
+        def check_calendar_and_generate_draft(
             sender: str,
             subject: str,
             body: str,
@@ -128,25 +119,59 @@ class AgentOrchestrator:
             start_raw_time: str = "",
             end_raw_time: str = "",
             language: str = "English",
-            event_created: bool = False,
-            start_iso: str = "",
-        ) -> str:
-            """Generate a draft email reply. Returns the email body as plain text."""
+        ) -> dict:
+            """Check calendar availability for the requested slot, then generate a draft reply.
+
+            Combines check_calendar + generate_draft, in that order. Calendar availability is only
+            checked when intent != "meeting_cancellation" and raw_date/start_raw_time are present
+            (same condition as before). Does NOT create any event or save anything.
+
+            Returns {"is_free": bool, "start_iso": str, "end_iso": str, "draft_body": str}.
+            """
+            # check_calendar
+            is_free, start_iso, end_iso = False, "", ""
+            if intent != "meeting_cancellation" and raw_date and start_raw_time:
+                start_iso = _responder._build_start_iso(raw_date, start_raw_time)
+                if not start_iso:
+                    logger.warning("check_calendar: could not parse date/time — raw_date=%r start_raw_time=%r", raw_date, start_raw_time)
+                    start_iso = ""
+                else:
+                    end_iso = _responder._build_start_iso(raw_date, end_raw_time) if end_raw_time else ""
+                    is_free = _calendar.is_time_free(start_iso, end_iso=end_iso)
+                    logger.info("check_calendar: start_iso=%s is_free=%s", start_iso, is_free)
+
+            # generate_draft
             analysis = {
                 "intent": intent,
-                "raw_date": raw_date,
-                "start_raw_time": start_raw_time,
+                "raw_date": raw_date if start_iso else "",
+                "start_raw_time": start_raw_time if start_iso else "",
                 "end_raw_time": end_raw_time,
                 "language": language,
-                "event_created": event_created,
+                "event_created": is_free,
                 "start_iso": start_iso,
             }
-            return _responder.generate_draft_response(
+            draft_body = _responder.generate_draft_response(
                 sender=sender, subject=subject, analysis=analysis, body=body,
             )
 
+            return {"is_free": is_free, "start_iso": start_iso, "end_iso": end_iso, "draft_body": draft_body}
+
         @tool
-        def save_draft(
+        def save_to_memory(
+            thread_id: str, subject: str, sender: str, language: str, intent: str, status: str
+        ) -> str:
+            """Persist the processing result to Supabase. status: DRAFTED, IGNORED, or ERROR.
+
+            thread_id must be the 'thread_id' field from the email JSON.
+            """
+            if not thread_id:
+                logger.warning("save_to_memory called with empty thread_id — skipping")
+                return "skipped: empty thread_id"
+            _memory.save_email(thread_id, subject, sender, status, language=language, intent=intent)
+            return f"saved with status={status}"
+
+        @tool
+        def save_draft_and_update_contact(
             to: str,
             subject: str,
             draft_body: str,
@@ -154,15 +179,22 @@ class AgentOrchestrator:
             message_id: str = "",
             start_iso: str = "",
             end_iso: str = "",
-        ) -> str:
-            """Save a reply draft to Gmail inside the original conversation thread.
+            name: str = "",
+            is_vip: bool = False,
+            language: str = "",
+            notes: str = "",
+        ) -> dict:
+            """Save a reply draft to Gmail, then update the contact's stored preferences.
 
-            Pass thread_id and message_id so the draft appears as a reply.
-            Pass start_iso (and optionally end_iso) when confirming a meeting —
-            the pending calendar event is saved automatically so it can be created
-            once the human sends the email.
-            Returns the draft ID.
+            Combines save_draft + save_user_memory, in that order.
+
+            Pass thread_id and message_id so the draft appears as a reply. Pass start_iso (and
+            optionally end_iso) when confirming a meeting — the pending calendar event is saved
+            automatically so it can be created once the human sends the email.
+
+            Returns {"draft_id": str, "save_user_memory": str}.
             """
+            # save_draft
             draft_id = self._gmail.save_draft(
                 to=to,
                 subject=f"Re: {subject}",
@@ -180,63 +212,22 @@ class AgentOrchestrator:
                     end_iso=end_iso,
                 )
                 logger.info("save_draft: pending event stored for thread=%s at %s", thread_id, start_iso)
-            return draft_id
 
-        @tool
-        def mark_as_read(email_id: str) -> str:
-            """Remove the UNREAD label from a Gmail message."""
-            self._gmail.mark_as_read(email_id)
-            return "marked as read"
+            # save_user_memory
+            _memory.upsert_user(to, name=name, is_vip=is_vip, language=language, notes=notes)
 
-        @tool
-        def save_to_memory(
-            thread_id: str, subject: str, sender: str, language: str, intent: str, status: str
-        ) -> str:
-            """Persist the processing result to Supabase. status: DRAFTED, IGNORED, or ERROR.
-
-            thread_id must be the 'thread_id' field from the email JSON.
-            """
-            if not thread_id:
-                logger.warning("save_to_memory called with empty thread_id — skipping")
-                return "skipped: empty thread_id"
-            _memory.save_email(thread_id, subject, sender, status, language=language, intent=intent)
-            return f"saved with status={status}"
-
-        @tool
-        def get_user_context(sender_email: str) -> dict:
-            """Return stored preferences and VIP status for a contact.
-
-            Returns {"name": str, "is_vip": bool, "language": str, "notes": str}
-            or {} if this contact is unknown.
-            """
-            return _memory.get_user(sender_email)
-
-        @tool
-        def save_user_memory(
-            sender_email: str,
-            name: str = "",
-            is_vip: bool = False,
-            language: str = "",
-            notes: str = "",
-        ) -> str:
-            """Store or update preferences for a contact (name, VIP status, language, notes)."""
-            _memory.upsert_user(sender_email, name=name, is_vip=is_vip, language=language, notes=notes)
-            return f"user memory updated for {sender_email}"
+            return {"draft_id": draft_id, "save_user_memory": f"user memory updated for {to}"}
 
         # Build the ReAct agent: model + tools + system prompt
         self._agent = create_agent(
             model=agent_model,
             name="AI_Executive_Assistant_Agent",
             tools=[
-                check_if_processed,
-                get_user_context,
-                classify_email,
-                check_calendar,
-                generate_draft,
-                save_draft,
-                save_user_memory,
-                mark_as_read,
+                check_processed_and_mark_read,
+                get_context_and_classify,
+                check_calendar_and_generate_draft,
                 save_to_memory,
+                save_draft_and_update_contact,
             ],
             system_prompt=_SYSTEM_PROMPT,
         )

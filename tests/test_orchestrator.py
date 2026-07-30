@@ -37,15 +37,11 @@ def test_orchestrator_builds_agent_with_correct_tools():
     _, kwargs = mock_build.call_args
     tool_names = {t.name for t in kwargs["tools"]}
     assert tool_names == {
-        "check_if_processed",
-        "get_user_context",
-        "classify_email",
-        "check_calendar",
-        "generate_draft",
-        "save_draft",
-        "save_user_memory",
-        "mark_as_read",
+        "check_processed_and_mark_read",
+        "get_context_and_classify",
+        "check_calendar_and_generate_draft",
         "save_to_memory",
+        "save_draft_and_update_contact",
     }
 
 
