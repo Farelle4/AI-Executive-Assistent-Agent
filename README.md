@@ -74,13 +74,11 @@ STEP 6  generate_draft(...)
         │ is_free=False → decline + propose 3 alternative slots (spread through day)
         │ start_iso=""  → ask for a more precise date and time
         ▼
-STEP 7  save_to_memory(thread_id, ..."DRAFTED")   ← must run BEFORE save_draft
+STEP 7  save_to_memory(sender, name, is_vip, ...)
         ▼
 STEP 8  save_draft(to, subject, draft_body, thread_id, start_iso, end_iso)
         │ → Gmail draft saved as reply in the original thread
         │ → if start_iso set: pending_event saved to Supabase
-        ▼
-STEP 9  save_user_memory(sender, name, is_vip, ...)
 ```
 
 ### Calendar Event Creation (run_sent_batch)
