@@ -179,7 +179,7 @@ agentic-ai-project/
 ### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/your-username/agentic-ai-project.git
+git clone https://github.com/Farelle4/AI-Executive-Assistent-Agent.git
 cd agentic-ai-project
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
