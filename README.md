@@ -180,7 +180,7 @@ agentic-ai-project/
 
 ```bash
 git clone https://github.com/Farelle4/AI-Executive-Assistent-Agent.git
-cd agentic-ai-project
+cd AI-Executive-Assistent-Agent
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
